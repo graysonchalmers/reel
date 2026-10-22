@@ -5,7 +5,8 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { type Img, type Sources, type TextSpec, frameAt, image, needs, scaled } from "../core/compose.ts";
 import { ReelError } from "../core/errors.ts";
-import type { Clip, ShotDef, Timeline } from "../core/project.ts";
+import type { Clip, Overlay, ShotDef, Timeline } from "../core/project.ts";
+import { spawnSync } from "node:child_process";
 import { FrameSource, type Probe, ShotStream, decodeSize, inspect, textImage } from "./media.ts";
 
 export interface RenderOptions {
@@ -103,9 +104,21 @@ class StreamSources implements Sources {
     return textImage(spec, this.texts);
   }
 
+  /** Overlays are small and few: random access through the still source is enough. */
+  overlay(ov: Overlay, u: number): Img {
+    return this.stills.overlay(ov, u);
+  }
+
   close(): void {
     for (const s of this.streams.values()) s.close();
   }
+}
+
+/** An animated GIF from a rendered MP4 (two-pass palette), `width` px wide at `fps`, for READMEs, stores and social posts. */
+export function gifFromMp4(mp4: string, gif: string, width = 480, fps = 15): void {
+  const r = spawnSync("ffmpeg", ["-y", "-v", "error", "-i", mp4, "-vf", `fps=${fps},scale=${width}:-2:flags=lanczos,split[a][b];[a]palettegen=max_colors=255:stats_mode=diff[p];[b][p]paletteuse=dither=sierra2_4a`, "-loop", "0", gif]);
+  if (r.error) throw new ReelError("--gif needs ffmpeg on PATH");
+  if (r.status !== 0) throw new ReelError(`ffmpeg failed (gif): ${String(r.stderr).trim().split("\n").slice(-3).join(" | ")}`);
 }
 
 export async function renderMp4(full: Timeline, out: string, opts: RenderOptions = {}): Promise<{ ms: number; warnings: string[] }> {

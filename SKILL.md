@@ -30,7 +30,8 @@ Needs Node ≥ 22.18, ffmpeg on PATH, and `npm install` once in this skill's dir
    When they say "check the feedback", read `out/_feedback/<name>.json`: each note has `t` (and
    `t1` for a span), their `text`, the `clip` on screen (`n`, `loc` = the source line, `u` = seconds
    into that clip) and the `beat`. Look at `<name>.n<k>.png` for the frame they meant.
-6. Ship: `REEL build trailer.rx.js` renders full size to `out/<name>.mp4`.
+6. Ship: `REEL build trailer.rx.js` renders full size to `out/<name>.mp4`; `--gif` adds `out/<name>.gif`
+   (480 px wide) for a README, a store page or a post.
 
 Errors name file:line:col and the clip path, and suggest fixes ("did you mean 'fade'?").
 
@@ -64,8 +65,13 @@ trailer("teaser", { w: 1920, h: 1080, fps: 30, bpm: 100, music: "out/music/score
 - **title(text, opts)**: `dur | beats`, `sub`, `size font weight color tracking pos shadow bg`,
   `anim` ("push" slow zoom, "punch" slam in, "none"), `sfx`, `in`. `\n` breaks lines; long lines wrap.
 - **Transitions** (`in:` of the incoming clip, over its first seconds): `"cut"`, `fade(d)`,
-  `dip(d, color)`, `flash(d, color)`, `wipe(d)`. Clips stay back to back; cuts are frame-exact.
+  `dip(d, color)`, `flash(d, color)`, `wipe(d)`, `slide(d, "left" | "right" | "up" | "down")` (push),
+  `zoom(d)` (the old shot grows while the new one fades in). Clips stay back to back; cuts are frame-exact.
 - **sfx(src, { at, vol })**: at seconds into the clip.
+- **overlay** on any clip: `{ src, x, y, w, at, dur, opacity, pixel }` or a list: logos, sprites (a pxl
+  GIF keeps looping), picture-in-picture, HUD mockups, drawn under captions and titles.
+- **grade** on a clip or the trailer: `{ brightness, contrast, saturation, gamma, tint, tintAmount,
+  vignette }`: a look (teal-orange, bleached, night) in a few numbers.
 
 Full API: [reference.md](reference.md).
 

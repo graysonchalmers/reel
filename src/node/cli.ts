@@ -8,15 +8,16 @@ import { png } from "../core/png.ts";
 import type { Project } from "../core/project.ts";
 import { loadProject } from "./load.ts";
 import { FrameSource, inspect } from "./media.ts";
-import { renderMp4 } from "./render.ts";
+import { gifFromMp4, renderMp4 } from "./render.ts";
 import { contactSheet, report } from "./report.ts";
 import { serve } from "./server.ts";
 
 const USAGE = `reel — video game trailers as code
 
-  reel build <trailer.rx.js> [--out DIR] [--only a,b] [--proxy] [--no-preview]
+  reel build <trailer.rx.js> [--out DIR] [--only a,b] [--proxy] [--gif [WIDTH]] [--no-preview]
       Render each trailer to out/<name>.mp4 (H.264 + AAC) and a contact sheet to
       out/_preview/<name>.png. --proxy renders half size, fast, to out/_proxy/.
+      --gif also writes out/<name>.gif (480 px wide at 15 fps, or WIDTH px) for READMEs and posts.
   reel info  <trailer.rx.js> [name]
       Clip times, beat alignment, music loudness and hits per clip, warnings.
   reel frame <trailer.rx.js> <name> <seconds> [--out DIR]
@@ -28,7 +29,7 @@ const USAGE = `reel — video game trailers as code
 
 Trailer files may be .js or .ts. Media paths are relative to the file. Needs ffmpeg.`;
 
-interface Args { cmd?: string; file?: string; rest: string[]; out?: string; only?: string[]; proxy?: boolean; preview?: boolean; port?: number }
+interface Args { cmd?: string; file?: string; rest: string[]; out?: string; only?: string[]; proxy?: boolean; preview?: boolean; port?: number; gif?: number }
 
 function parse(argv: string[]): Args {
   const a: Args = { rest: [] };
@@ -42,6 +43,7 @@ function parse(argv: string[]): Args {
     if (v === "--out") a.out = val();
     else if (v === "--only") a.only = val().split(",").map((s) => s.trim()).filter(Boolean);
     else if (v === "--proxy") a.proxy = true;
+    else if (v === "--gif") { const n = Number(argv[i + 1]); if (Number.isFinite(n) && n > 0) { a.gif = n; i++; } else a.gif = 480; }
     else if (v === "--no-preview") a.preview = false;
     else if (v === "--port") a.port = Number(val());
     else if (v === "-h" || v === "--help") a.cmd = "help";
@@ -88,7 +90,9 @@ export async function main(argv: string[]): Promise<number> {
               onProgress: (f, n) => { const pc = Math.floor((f / n) * 10); if (process.stderr.isTTY && pc !== shown) { shown = pc; process.stderr.write(`\r${name} ${pc * 10}%`); } },
             });
             if (process.stderr.isTTY) process.stderr.write("\r\x1b[K");
-            console.log(`${r.text.split("\n")[0]} -> ${out} (${(res.ms / 1000).toFixed(1)}s)`);
+            let gifNote = "";
+            if (a.gif) { const g = join(outDir, name + ".gif"); gifFromMp4(out, g, a.gif); gifNote = ` + ${g}`; }
+            console.log(`${r.text.split("\n")[0]} -> ${out} (${(res.ms / 1000).toFixed(1)}s)${gifNote}`);
             for (const w of r.warnings) console.log("  warning: " + w);
           } catch (e) {
             failed++;

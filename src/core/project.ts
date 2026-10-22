@@ -3,14 +3,41 @@
 import { ReelError, didYouMean, wrap } from "./errors.ts";
 
 export type Ease = "linear" | "in" | "out" | "inOut";
-export type TransType = "cut" | "fade" | "dip" | "flash" | "wipe";
+export type TransType = "cut" | "fade" | "dip" | "flash" | "wipe" | "slide" | "zoom";
+export type Dir = "left" | "right" | "up" | "down";
 
-export interface Trans { __trans: true; type: TransType; dur: number; color: string }
+export interface Trans { __trans: true; type: TransType; dur: number; color: string; dir: Dir }
 export interface Sfx { __sfx: true; src: string; at: number; vol: number; loc?: string }
 export interface Move { zoom: [number, number]; x: [number, number]; y: [number, number]; ease: Ease }
 export interface TextStyle { size: number; font: string; weight: number; color: string; tracking: number; pos: "center" | "bottom" | "top"; shadow: boolean }
+/** An image, GIF or video drawn over a clip: logos, sprites, picture-in-picture, UI mockups. */
+export interface Overlay {
+  src: string;
+  /** Center as fractions of the frame. */
+  x: number;
+  y: number;
+  /** Width as a fraction of the frame width (height keeps the aspect), or height when only `h` is given. */
+  w?: number;
+  h?: number;
+  /** Seconds into the clip it appears, and for how long (default: to the end). */
+  at: number;
+  dur?: number;
+  opacity: number;
+  pixel: boolean;
+  loc?: string;
+}
+/** A look: applied to a clip after it is drawn, or to the whole trailer. */
+export interface Grade {
+  brightness: number;
+  contrast: number;
+  saturation: number;
+  gamma: number;
+  tint?: string;
+  tintAmount: number;
+  vignette: number;
+}
 
-interface ClipBase { label: string; loc?: string; dur: number | undefined; beats: number | undefined; in: Trans; sfx: Sfx[] }
+interface ClipBase { label: string; loc?: string; dur: number | undefined; beats: number | undefined; in: Trans; sfx: Sfx[]; overlays: Overlay[]; grade?: Grade }
 export interface ShotDef extends ClipBase {
   kind: "shot";
   src: string;
@@ -49,21 +76,25 @@ export interface TrailerDef {
   letterbox?: number;
   fadeIn: number;
   fadeOut: number;
+  grade?: Grade;
   clips: ClipDef[];
 }
 
 export interface Clip { i: number; def: ClipDef; start: number; dur: number; frames: number }
 export interface Timeline { def: TrailerDef; clips: Clip[]; dur: number; frames: number; beats: number[] }
 
-const TRAILER_OPTS = ["w", "h", "fps", "bpm", "beat0", "music", "letterbox", "fadeIn", "fadeOut"];
+const TRAILER_OPTS = ["w", "h", "fps", "bpm", "beat0", "music", "letterbox", "fadeIn", "fadeOut", "grade"];
 const MUSIC_OPTS = ["src", "from", "vol", "fadeOut"];
-const CLIP_OPTS = ["dur", "beats", "in", "sfx"];
+const CLIP_OPTS = ["dur", "beats", "in", "sfx", "overlay", "grade"];
+const OVERLAY_OPTS = ["src", "x", "y", "w", "h", "at", "dur", "opacity", "pixel"];
+const GRADE_OPTS = ["brightness", "contrast", "saturation", "gamma", "tint", "tintAmount", "vignette"];
+const DIRS: Dir[] = ["left", "right", "up", "down"];
 const SHOT_OPTS = [...CLIP_OPTS, "from", "speed", "fit", "pixel", "bg", "move", "audio", "caption"];
 const TITLE_OPTS = [...CLIP_OPTS, "sub", "size", "font", "weight", "color", "tracking", "pos", "shadow", "bg", "anim"];
 const MOVE_OPTS = ["zoom", "x", "y", "ease"];
 const TEXT_OPTS = ["text", "size", "font", "weight", "color", "tracking", "pos", "shadow"];
 const EASES: Ease[] = ["linear", "in", "out", "inOut"];
-const TRANS: TransType[] = ["cut", "fade", "dip", "flash", "wipe"];
+const TRANS: TransType[] = ["cut", "fade", "dip", "flash", "wipe", "slide", "zoom"];
 
 const isPlain = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isTrans = (v: unknown): v is Trans => isPlain(v) && v.__trans === true;
@@ -98,14 +129,31 @@ function oneOf<T extends string>(what: string, v: unknown, all: readonly T[]): T
 }
 
 function trans(v: unknown): Trans {
-  if (v === undefined) return { __trans: true, type: "cut", dur: 0, color: "#000000" };
+  if (v === undefined) return { __trans: true, type: "cut", dur: 0, color: "#000000", dir: "left" };
   if (typeof v === "string") return makeTrans(oneOf("in", v, TRANS));
   if (isTrans(v)) return v;
-  throw new ReelError(`in: use a transition like "fade" or fade(0.5), dip(0.4, "#000"), flash(0.15), wipe(0.4)`);
+  throw new ReelError(`in: use a transition like "fade" or fade(0.5), dip(0.4, "#000"), flash(0.15), wipe(0.4), slide(0.4, "left"), zoom(0.5)`);
 }
 function makeTrans(type: TransType, dur?: unknown, c?: unknown): Trans {
-  const def = { cut: 0, fade: 0.5, dip: 0.6, flash: 0.25, wipe: 0.4 }[type];
-  return { __trans: true, type, dur: type === "cut" ? 0 : dur === undefined ? def : num(`${type}() duration`, dur, 0.01, 10), color: color(`${type}() color`, c ?? (type === "flash" ? "#ffffff" : "#000000")) };
+  const def = { cut: 0, fade: 0.5, dip: 0.6, flash: 0.25, wipe: 0.4, slide: 0.4, zoom: 0.5 }[type];
+  const d = type === "cut" ? 0 : dur === undefined ? def : num(`${type}() duration`, dur, 0.01, 10);
+  // slide's second argument is the direction the new clip comes from
+  if (type === "slide") return { __trans: true, type, dur: d, color: "#000000", dir: c === undefined ? "left" : oneOf("slide() direction", c, DIRS) };
+  return { __trans: true, type, dur: d, color: color(`${type}() color`, c ?? (type === "flash" ? "#ffffff" : "#000000")), dir: "left" };
+}
+
+function gradeOf(what: string, v: unknown): Grade {
+  if (!isPlain(v)) throw new ReelError(`${what}: { brightness, contrast, saturation, gamma, tint, tintAmount, vignette }`);
+  checkKeys(what, v, GRADE_OPTS);
+  return {
+    brightness: v.brightness === undefined ? 0 : num(`${what} brightness`, v.brightness, -1, 1),
+    contrast: v.contrast === undefined ? 1 : num(`${what} contrast`, v.contrast, 0, 4),
+    saturation: v.saturation === undefined ? 1 : num(`${what} saturation`, v.saturation, 0, 4),
+    gamma: v.gamma === undefined ? 1 : num(`${what} gamma`, v.gamma, 0.1, 5),
+    tint: v.tint === undefined ? undefined : color(`${what} tint`, v.tint),
+    tintAmount: v.tintAmount === undefined ? 0.25 : num(`${what} tintAmount`, v.tintAmount, 0, 1),
+    vignette: v.vignette === undefined ? 0 : num(`${what} vignette`, v.vignette, 0, 1),
+  };
 }
 
 function textStyle(what: string, o: Record<string, unknown>, d: Partial<TextStyle>): TextStyle {
@@ -173,8 +221,20 @@ export class Project {
         if (isSfx(s)) return s;
         throw new ReelError(`sfx: use a path or sfx("hit.wav", { at: 0.2, vol: 0.8 })`);
       });
+      const overlays = o.overlay === undefined ? [] : (Array.isArray(o.overlay) ? o.overlay : [o.overlay]).map((ov): Overlay => {
+        if (!isPlain(ov)) throw new ReelError(`overlay: { src, x, y, w, at, dur, opacity, pixel } or a list of them`);
+        checkKeys("overlay", ov, OVERLAY_OPTS);
+        if (ov.w !== undefined && ov.h !== undefined) throw new ReelError("overlay: give w or h (the other keeps the aspect), not both");
+        return {
+          src: this.pathHook(str("overlay src", ov.src)), loc,
+          x: ov.x === undefined ? 0.5 : num("overlay x", ov.x, -1, 2), y: ov.y === undefined ? 0.5 : num("overlay y", ov.y, -1, 2),
+          w: ov.w === undefined ? (ov.h === undefined ? 0.25 : undefined) : num("overlay w", ov.w, 0.01, 4), h: ov.h === undefined ? undefined : num("overlay h", ov.h, 0.01, 4),
+          at: ov.at === undefined ? 0 : num("overlay at", ov.at, 0), dur: ov.dur === undefined ? undefined : num("overlay dur", ov.dur, 1e-3),
+          opacity: ov.opacity === undefined ? 1 : num("overlay opacity", ov.opacity, 0, 1), pixel: Boolean(ov.pixel),
+        };
+      });
       return {
-        label, loc, in: trans(o.in), sfx,
+        label, loc, in: trans(o.in), sfx, overlays, grade: o.grade === undefined ? undefined : gradeOf("grade", o.grade),
         dur: o.dur === undefined ? undefined : num("dur", o.dur, 1e-3, 3600),
         beats: o.beats === undefined ? undefined : num("beats", o.beats, 0.125, 10000),
       };
@@ -207,6 +267,7 @@ export class Project {
         letterbox: o.letterbox === undefined ? undefined : num("letterbox", o.letterbox, 0.2, 5),
         fadeIn: o.fadeIn === undefined ? 0 : num("fadeIn", o.fadeIn, 0, 30),
         fadeOut: o.fadeOut === undefined ? 0 : num("fadeOut", o.fadeOut, 0, 30),
+        grade: o.grade === undefined ? undefined : gradeOf("trailer grade", o.grade),
         clips: clips as ClipDef[],
       };
       if (def.w % 2 || def.h % 2) throw new ReelError(`w and h must be even (H.264), got ${def.w}x${def.h}`);
@@ -299,7 +360,7 @@ export class Project {
         exact += sec;
         const end = Math.round(exact * def.fps);
         const frames = Math.max(1, end - frame);
-        if (c.in.type !== "cut" && i === 0 && c.in.type !== "flash" && c.in.type !== "dip") throw new ReelError(`the first clip can't ${c.in.type} in from nothing; use the trailer's fadeIn or dip()`);
+        if (i === 0 && !["cut", "flash", "dip", "slide", "zoom"].includes(c.in.type)) throw new ReelError(`the first clip can't ${c.in.type} in from nothing; use the trailer's fadeIn or dip()`);
         if (c.in.dur * def.fps > frames) throw new ReelError(`the ${c.in.type} (${c.in.dur}s) is longer than the clip (${(frames / def.fps).toFixed(2)}s)`);
         clips.push({ i, def: c, start: frame / def.fps, dur: frames / def.fps, frames });
         frame += frames;

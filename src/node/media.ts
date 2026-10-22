@@ -6,7 +6,7 @@ import { statSync } from "node:fs";
 import { Resvg } from "@resvg/resvg-js";
 import { type Img, type Sources, type TextSpec, image } from "../core/compose.ts";
 import { ReelError } from "../core/errors.ts";
-import type { Clip, ShotDef, Timeline } from "../core/project.ts";
+import type { Clip, Overlay, ShotDef, Timeline } from "../core/project.ts";
 
 export interface Probe {
   path: string;
@@ -67,6 +67,10 @@ export function inspect(tl: Timeline): { probes: Map<string, Probe>; warnings: s
   for (const c of tl.clips) {
     const what = `clip ${c.i + 1} (${c.def.label})`;
     for (const s of c.def.sfx) get(s.src, `${what} sfx`, s.loc ?? c.def.loc);
+    for (const ov of c.def.overlays) {
+      const po = get(ov.src, `${what} overlay`, ov.loc ?? c.def.loc);
+      if (!po.w) throw new ReelError(`overlay '${po.path}' has no picture`).within(what, c.def.loc);
+    }
     if (c.def.kind !== "shot") continue;
     const p = get(c.def.src, what, c.def.loc);
     if (!p.w) throw new ReelError(`'${p.path}' has no picture`).within(what, c.def.loc);
@@ -82,10 +86,24 @@ const base = (p: string) => p.replace(/^.*[\\/]/, "");
 
 /** Source seconds a shot shows u seconds after it starts. */
 export function sourceTime(d: ShotDef, p: Probe, u: number): number {
-  let t = d.from + u * d.speed;
+  return srcTime(p, d.from, d.speed, u);
+}
+
+/** Source seconds for a playhead `from + u * speed`: stills are always 0, GIFs loop, videos hold their last frame. */
+function srcTime(p: Probe, from: number, speed: number, u: number): number {
+  let t = from + u * speed;
   if (p.dur === undefined) return 0;
   if (p.loop) t %= p.dur;
-  return Math.max(0, Math.min(t, p.dur - 0.5 / Math.max(1, p.fps || 30)));
+  // never past the start of the last frame: a GIF's declared length includes that frame's hold
+  const fps = Math.max(0.5, p.fps || 30), last = p.loop ? p.dur - 1 / fps : p.dur - 0.5 / fps;
+  return Math.max(0, Math.min(t, last));
+}
+
+/** Decode size of an overlay: never more pixels than it covers on the frame. */
+export function overlaySize(ov: Overlay, p: Probe, W: number, H: number): [number, number] {
+  const s = Math.min(1, ov.w !== undefined ? (ov.w * W) / p.w : (ov.h! * H) / p.h);
+  const even = (v: number) => Math.max(2, Math.round(v / 2) * 2);
+  return [even(p.w * s), even(p.h * s)];
 }
 
 /** Decode size: never more pixels than the shot can show at its largest zoom. */
@@ -171,12 +189,25 @@ export class FrameSource implements Sources {
   shot(c: Clip, u: number): Img {
     const d = c.def as ShotDef, p = this.probes.get(d.src)!;
     const [w, h] = decodeSize(d, p, this.tl.def.w, this.tl.def.h);
-    const t = sourceTime(d, p, u);
-    const key = `${d.src}|${d.pixel}|${w}x${h}|${p.dur === undefined ? "still" : Math.round(t * 1000)}`;
+    return this.frame(d.src, p, d.pixel, w, h, sourceTime(d, p, u), d.loc);
+  }
+
+  overlay(ov: Overlay, u: number): Img {
+    const p = this.probes.get(ov.src)!;
+    const [w, h] = overlaySize(ov, p, this.tl.def.w, this.tl.def.h);
+    return this.frame(ov.src, p, ov.pixel, w, h, srcTime(p, 0, 1, u), ov.loc);
+  }
+
+  /** One decoded frame of a source at a size and time (stills decode once), cached. */
+  private frame(src: string, p: Probe, pixel: boolean, w: number, h: number, t: number, loc?: string): Img {
+    const key = `${src}|${pixel}|${w}x${h}|${p.dur === undefined ? "still" : Math.round(t * 1000)}`;
     let im = this.frames.get(key);
     if (!im) {
-      const data = run([...(p.dur === undefined ? [] : ["-ss", t.toFixed(4)]), "-i", d.src, "-frames:v", "1", "-vf", scaleFilter(d, w, h), "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"], "decoding a frame");
-      if (data.length < w * h * 4) throw new ReelError(`could not decode a frame of '${base(d.src)}' at ${t.toFixed(2)}s`, d.loc);
+      const decode = (at: number) => run([...(p.dur === undefined ? [] : ["-ss", at.toFixed(4)]), "-i", src, "-frames:v", "1", "-vf", `scale=${w}:${h}:flags=${pixel ? "neighbor" : "lanczos"}`, "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"], "decoding a frame");
+      let data = decode(t);
+      // variable frame timing can leave a seek just past the last frame: step back one frame once
+      if (data.length < w * h * 4 && p.dur !== undefined && t > 0) data = decode(Math.max(0, t - 1 / Math.max(0.5, p.fps || 30)));
+      if (data.length < w * h * 4) throw new ReelError(`could not decode a frame of '${base(src)}' at ${t.toFixed(2)}s`, loc);
       im = { w, h, data: new Uint8Array(data.buffer, data.byteOffset, w * h * 4) };
       if (this.frames.size > 48) this.frames.delete(this.frames.keys().next().value!);
       this.frames.set(key, im);

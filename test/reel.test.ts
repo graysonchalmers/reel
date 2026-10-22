@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { type Img, type Sources, frameAt, image, needs, shotPlacement } from "../src/core/compose.ts";
 import { loadSource } from "../src/node/load.ts";
-import { probe } from "../src/node/media.ts";
+import { FrameSource, inspect, probe } from "../src/node/media.ts";
 import { analyzeMusic } from "../src/node/music.ts";
 import { renderMp4 } from "../src/node/render.ts";
 import { report } from "../src/node/report.ts";
@@ -125,4 +125,70 @@ trailer("t", { w: 64, h: 36, fps: 30, bpm: 84 },
     assert.ok(Math.abs(beats - Math.round(beats)) * spb <= 0.5 / 30 + 1e-9, `clip ${c.i + 1} starts ${c.start} off the grid`);
   }
   assert.match(tl.clips[1].def.loc!, /^t\.rx\.js:3:/);
+});
+
+test("slide and zoom transitions, clip and trailer grades, overlays over clips", () => {
+  const p = loadSource(`trailer("t", { w: 16, h: 16, fps: 10, grade: { saturation: 1 } },
+    shot("a.png", { dur: 1, grade: { brightness: -0.5 } }),
+    shot("b.png", { dur: 1, in: slide(1, "left") }),
+    shot("c.png", { dur: 1, in: zoom(1) }),
+    shot("a.png", { dur: 1, overlay: { src: "c.png", x: 0.25, y: 0.25, w: 0.25, at: 0.5 } }))`, "t.rx.js", dir);
+  const tl = p.timeline("t");
+  const colors: Record<string, Img> = { "a.png": solid(255, 0, 0), "b.png": solid(0, 0, 255), "c.png": solid(0, 255, 0) };
+  const name = (s: string) => s.replace(/^.*\//, "");
+  const src: Sources = { shot: (c) => colors[name((c.def as { src: string }).src)], text: () => image(1, 1), overlay: (ov) => colors[name(ov.src)] };
+  assert.deepEqual(px(frameAt(tl, 0.5, src), 4, 4), [128, 0, 0], "the clip grade darkens the red shot");
+  // slide from the left at the midpoint: the incoming blue covers the left half, red is pushed right
+  const mid = frameAt(tl, 1.5, src);
+  assert.deepEqual(px(mid, 3, 8), [0, 0, 255]);
+  assert.deepEqual(px(mid, 12, 8), [128, 0, 0]);
+  // zoom midpoint: a mix of the grown blue and the incoming green
+  const z = px(frameAt(tl, 2.5, src), 8, 8);
+  assert.ok(z[1] > 100 && z[2] > 60 && z[0] < 30, `zoom mix ${z}`);
+  // the overlay appears half a second in, a quarter of the frame wide, centred at (0.25, 0.25)
+  assert.deepEqual(px(frameAt(tl, 3.2, src), 4, 4), [255, 0, 0], "before `at`: no overlay");
+  assert.deepEqual(px(frameAt(tl, 3.7, src), 4, 4), [0, 255, 0], "overlay pixel");
+  assert.deepEqual(px(frameAt(tl, 3.7, src), 12, 12), [255, 0, 0], "outside the overlay");
+  const down = loadSource(`trailer("t", { w: 16, h: 16, fps: 10 }, shot("a.png", { dur: 1 }), shot("b.png", { dur: 1, in: slide(1, "down") }))`, "t.rx.js", dir).timeline("t");
+  assert.deepEqual(px(frameAt(down, 1.5, src), 8, 12), [0, 0, 255], "from below: the bottom half is the new clip");
+  assert.deepEqual(px(frameAt(down, 1.5, src), 8, 3), [255, 0, 0]);
+  throwsMsg(() => loadSource(`trailer("t", {}, shot("a.png", { in: slide(0.3, "sideways") }))`, "t.rx.js"), /slide\(\) direction must be one of/);
+  throwsMsg(() => loadSource(`trailer("t", {}, shot("a.png", { grade: { contrast: 9 } }))`, "t.rx.js"), /contrast must be in 0\.\.4/);
+  throwsMsg(() => loadSource(`trailer("t", {}, shot("a.png", { overlay: { src: "x.png", w: 0.2, h: 0.2 } }))`, "t.rx.js"), /give w or h/);
+  throwsMsg(() => loadSource(`trailer("t", {}, shot("a.png", { overlay: { src: "x.png", opacty: 1 } }))`, "t.rx.js"), /unknown option 'opacty'/);
+  assert.equal(frameAt(tl, 1.5, src).w, 16);
+});
+
+test("grade: saturation, tint and vignette change the right pixels", async () => {
+  const { grade } = await import("../src/core/compose.ts");
+  const im = solid(200, 50, 50, 20, 10);
+  grade(im, { brightness: 0, contrast: 1, saturation: 0, gamma: 1, tintAmount: 0, vignette: 0 });
+  const g = px(im, 10, 5);
+  assert.ok(g[0] === g[1] && g[1] === g[2], `desaturated to gray: ${g}`);
+  const t = solid(100, 100, 100, 20, 10);
+  grade(t, { brightness: 0, contrast: 1, saturation: 1, gamma: 1, tint: "#ff0000", tintAmount: 0.5, vignette: 0 });
+  assert.deepEqual(px(t, 10, 5), [178, 50, 50]);
+  const v = solid(200, 200, 200, 20, 10);
+  grade(v, { brightness: 0, contrast: 1, saturation: 1, gamma: 1, tintAmount: 0, vignette: 1 });
+  assert.ok(px(v, 10, 5)[0] > 190 && px(v, 0, 0)[0] < 80, `vignette darkens the corners: ${px(v, 10, 5)} vs ${px(v, 0, 0)}`);
+});
+
+test("overlays are probed, decoded at their size and rendered; --gif writes an animated GIF", async () => {
+  const p = loadSource(`trailer("t", { w: 64, h: 36, fps: 30 }, shot("bg.mp4", { dur: 0.5, overlay: [{ src: "red.png", x: 0.25, y: 0.5, w: 0.5 }, { src: "bg.mp4", x: 0.8, y: 0.8, h: 0.3, opacity: 0.5 }] }))`, "t.rx.js", dir);
+  const tl = p.timeline("t");
+  const { probes } = inspect(tl);
+  assert.ok(probes.has(join(dir, "red.png")));
+  const im = frameAt(tl, 0.2, new FrameSource(tl, probes));
+  const left = px(im, 16, 18), right = px(im, 50, 10);
+  assert.ok(left[0] > 180 && left[2] < 60, `the red overlay covers the left quarter: ${left}`);
+  assert.ok(right[2] > 180 && right[0] < 60, `the clip shows through elsewhere: ${right}`);
+  const missing = loadSource(`trailer("t", { w: 64, h: 36 }, shot("red.png", { overlay: { src: "nope.png" } }))`, "t.rx.js", dir);
+  throwsMsg(() => inspect(missing.timeline("t")), /clip 1 .* overlay.*no such file|no such file/);
+  const { gifFromMp4, renderMp4: render } = await import("../src/node/render.ts");
+  const mp4 = join(dir, "ov.mp4"), gif = join(dir, "ov.gif");
+  await render(tl, mp4);
+  gifFromMp4(mp4, gif, 32, 10);
+  const b = readFileSync(gif);
+  assert.equal(b.toString("ascii", 0, 6), "GIF89a");
+  assert.equal(b.readUInt16LE(6), 32, "scaled to the asked width");
 });

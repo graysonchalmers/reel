@@ -1,7 +1,8 @@
 // The compositor: one trailer frame at a time, from clip frames and text images the caller
 // supplies. The live viewer, the contact sheet and the final render all draw through frameAt(),
 // so what the agent inspects is exactly what gets encoded.
-import { type Clip, type ShotDef, type TextStyle, type Timeline, type TitleDef, ease } from "./project.ts";
+import { ReelError } from "./errors.ts";
+import { type Clip, type Grade, type Overlay, type ShotDef, type TextStyle, type Timeline, type TitleDef, ease } from "./project.ts";
 
 /** RGBA, straight alpha. */
 export interface Img { w: number; h: number; data: Uint8Array }
@@ -11,6 +12,8 @@ export interface Sources {
   /** The frame a shot shows `u` seconds after it starts (the caller maps u to source time). */
   shot(clip: Clip, u: number): Img;
   text(spec: TextSpec): Img;
+  /** The frame an overlay shows `u` seconds after it appears (stills always, GIFs looping, videos from their start). */
+  overlay?(ov: Overlay, u: number): Img;
 }
 
 export function image(w: number, h: number): Img {
@@ -113,12 +116,69 @@ function mix(dst: Img, top: Img, a: number): void {
   for (let i = 0; i < d.length; i += 4) { d[i] = t[i] * a + d[i] * ia; d[i + 1] = t[i + 1] * a + d[i + 1] * ia; d[i + 2] = t[i + 2] * a + d[i + 2] * ia; }
 }
 
-let scratch: Img | undefined;
+/** Scratch frames by name, reused across frames (the compositor draws whole clips off screen for mixes and slides). */
+const scratches = new Map<string, Img>();
+function scratchImg(name: string, w: number, h: number): Img {
+  let s = scratches.get(name);
+  if (!s || s.w !== w || s.h !== h) { s = image(w, h); scratches.set(name, s); }
+  return s;
+}
+
+const luts = new Map<string, Uint8Array>();
+/** Per-channel lookup for brightness, contrast and gamma. */
+function lutOf(g: Grade): Uint8Array {
+  const key = `${g.brightness}|${g.contrast}|${g.gamma}`;
+  let lut = luts.get(key);
+  if (!lut) {
+    lut = new Uint8Array(256);
+    for (let v = 0; v < 256; v++) {
+      let x = ((v / 255 - 0.5) * g.contrast + 0.5 + g.brightness);
+      x = Math.max(0, Math.min(1, x)) ** (1 / g.gamma);
+      lut[v] = Math.round(x * 255);
+    }
+    luts.set(key, lut);
+  }
+  return lut;
+}
+
+/** Apply a look in place: brightness / contrast / gamma, saturation, a tint, and a vignette, over columns [0, clipX). */
+export function grade(dst: Img, g: Grade, clipX = dst.w): void {
+  const lut = lutOf(g), d = dst.data, sat = g.saturation, tint = g.tint ? rgb(g.tint) : undefined, ta = g.tintAmount, vig = g.vignette;
+  const cx = dst.w / 2, cy = dst.h / 2;
+  for (let y = 0; y < dst.h; y++) {
+    const dy = (y + 0.5 - cy) / cy;
+    for (let x = 0; x < clipX; x++) {
+      const o = (y * dst.w + x) * 4;
+      let r = lut[d[o]], gg = lut[d[o + 1]], b = lut[d[o + 2]];
+      if (sat !== 1) {
+        const l = 0.299 * r + 0.587 * gg + 0.114 * b;
+        r = l + (r - l) * sat; gg = l + (gg - l) * sat; b = l + (b - l) * sat;
+      }
+      if (tint) { r += (tint[0] - r) * ta; gg += (tint[1] - gg) * ta; b += (tint[2] - b) * ta; }
+      if (vig > 0) {
+        const dx = (x + 0.5 - cx) / cx, r2 = (dx * dx + dy * dy) / 2, k = 1 - vig * Math.min(1, r2) ** 1.5;
+        r *= k; gg *= k; b *= k;
+      }
+      d[o] = r < 0 ? 0 : r > 255 ? 255 : Math.round(r); d[o + 1] = gg < 0 ? 0 : gg > 255 ? 255 : Math.round(gg); d[o + 2] = b < 0 ? 0 : b > 255 ? 255 : Math.round(b);
+    }
+  }
+}
+
+function drawOverlays(dst: Img, tl: Timeline, src: Sources, c: Clip, u: number, alpha: number, clipX: number): void {
+  const { w: W, h: H } = tl.def;
+  for (const ov of c.def.overlays) {
+    if (u < ov.at || (ov.dur !== undefined && u >= ov.at + ov.dur)) continue;
+    if (!src.overlay) throw new ReelError("internal: this frame source can't read overlays");
+    const im = src.overlay(ov, u - ov.at);
+    const s = ov.w !== undefined ? (ov.w * W) / im.w : (ov.h! * H) / im.h;
+    draw(dst, im, s, ov.x * W - (im.w * s) / 2, ov.y * H - (im.h * s) / 2, alpha * ov.opacity, ov.pixel, clipX);
+  }
+}
 
 function drawClip(dst: Img, tl: Timeline, src: Sources, c: Clip, u: number, alpha: number, clipX = dst.w): void {
   // A clip fading in is drawn whole, then mixed: its background must not darken what is under it.
   if (alpha < 1) {
-    if (!scratch || scratch.w !== dst.w || scratch.h !== dst.h) scratch = image(dst.w, dst.h);
+    const scratch = scratchImg("mix", dst.w, dst.h);
     drawClip(scratch, tl, src, c, u, 1, clipX);
     mix(dst, scratch, alpha);
     return;
@@ -129,13 +189,18 @@ function drawClip(dst: Img, tl: Timeline, src: Sources, c: Clip, u: number, alph
     const im = src.shot(c, u);
     const { s, tx, ty } = shotPlacement(d, im.w, im.h, W, H, p);
     draw(dst, im, s, tx, ty, alpha, d.pixel, clipX);
+    drawOverlays(dst, tl, src, c, u, alpha, clipX);
     if (d.caption) {
       const fade = Math.min(1, u / TEXT_FADE, (c.dur - u) / TEXT_FADE);
       const band = safe(tl), st = d.caption.style;
       const y = st.pos === "top" ? band.top + H * 0.1 : st.pos === "bottom" ? band.bot - H * 0.1 : H / 2;
       if (clipX >= W) drawText(dst, src, { text: d.caption.text, style: st, maxW: W * 0.85 }, W / 2, y, alpha * fade);
     }
-  } else if (clipX >= W) drawTitle(dst, tl, src, c, d, u, alpha);
+  } else {
+    drawOverlays(dst, tl, src, c, u, alpha, clipX);
+    if (clipX >= W) drawTitle(dst, tl, src, c, d, u, alpha);
+  }
+  if (d.grade) grade(dst, d.grade, clipX);
 }
 
 function drawTitle(dst: Img, tl: Timeline, src: Sources, c: Clip, d: TitleDef, u: number, alpha: number): void {
@@ -184,7 +249,28 @@ export function frameAt(tl: Timeline, t: number, src: Sources, dst = image(tl.de
   else if (tr.type === "dip") {
     if (p < 0.5) { if (prev) drawClip(dst, tl, src, prev, t - prev.start, 1); fill(dst, tr.color, prev ? p * 2 : 1); }
     else { drawClip(dst, tl, src, c, u, 1); fill(dst, tr.color, (1 - p) * 2); }
+  } else if (tr.type === "slide") {
+    // the incoming clip enters from `dir` and pushes the outgoing one out the other side
+    const e = ease("inOut", p), k = 1 - e;
+    const inX = tr.dir === "left" ? -k * W : tr.dir === "right" ? k * W : 0, inY = tr.dir === "up" ? -k * H : tr.dir === "down" ? k * H : 0;
+    const incoming = scratchImg("slideIn", W, H);
+    drawClip(incoming, tl, src, c, u, 1);
+    if (prev) {
+      const outgoing = scratchImg("slideOut", W, H);
+      drawClip(outgoing, tl, src, prev, t - prev.start, 1);
+      draw(dst, outgoing, 1, Math.round(inX + (tr.dir === "left" ? W : tr.dir === "right" ? -W : 0)), Math.round(inY + (tr.dir === "up" ? H : tr.dir === "down" ? -H : 0)));
+    }
+    draw(dst, incoming, 1, Math.round(inX), Math.round(inY));
+  } else if (tr.type === "zoom") {
+    // the outgoing clip keeps growing while the incoming one fades over it
+    if (prev) {
+      const outgoing = scratchImg("zoomOut", W, H), s = 1 + 0.3 * ease("in", p);
+      drawClip(outgoing, tl, src, prev, t - prev.start, 1);
+      draw(dst, outgoing, s, (W - W * s) / 2, (H - H * s) / 2);
+    }
+    drawClip(dst, tl, src, c, u, ease("inOut", p));
   }
+  if (tl.def.grade) grade(dst, tl.def.grade);
   if (letterbox) {
     const bar = Math.max(0, (H - W / letterbox) / 2);
     if (bar > 0) { fill(dst, "#000000", 1, 0, W, 0, bar); fill(dst, "#000000", 1, 0, W, H - bar, H); }

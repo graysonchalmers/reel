@@ -47,8 +47,10 @@ trailer("teaser", { w: 1920, h: 1080, fps: 30, bpm: 100, music: "score.wav", let
 
 Shots (video, GIF, image) with `from`, `speed`, `fit`, `move` (zoom and a focus point that stays in
 frame), `caption`, their own `audio`; titles with `push`/`punch` animation, wrapping, tracking and
-subtitles; `fade dip flash wipe` transitions; `sfx` on any clip; letterbox and fades; several
-trailers per file. Full API: [reference.md](reference.md). Agent guide: [SKILL.md](SKILL.md).
+subtitles; `fade dip flash wipe slide zoom` transitions; `overlay` images, GIFs and videos on any clip
+(logos, sprites, picture-in-picture); `grade` looks (brightness, contrast, saturation, gamma, tint,
+vignette) per clip or for the whole trailer; `sfx` on any clip; letterbox and fades; several trailers
+per file; `--gif` for an animated GIF. Full API: [reference.md](reference.md). Agent guide: [SKILL.md](SKILL.md).
 
 ## Commands
 
