@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>reel live</title>
+<style>
+  :root { --bg: #14131b; --panel: #1c1a26; --panel2: #25222f; --line: #322d40; --text: #e8e4f0; --dim: #9a93ab;
+    --accent: #ffb454; --bad: #ff6b7a; --ok: #7bd88f; --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, sans-serif; }
+  body { display: grid; grid-template: "head head" 44px "list main" 1fr / 220px 1fr; }
+  header { grid-area: head; display: flex; align-items: center; gap: 14px; padding: 0 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .logo { font: 700 15px var(--mono); color: var(--accent); letter-spacing: 1px; }
+  .file { font-family: var(--mono); color: var(--dim); }
+  .grow { flex: 1; }
+  .pill { padding: 2px 9px; border-radius: 99px; font: 600 11px var(--mono); background: var(--panel2); color: var(--dim); }
+  .pill.ok { color: var(--ok); } .pill.bad { color: var(--bad); }
+  #list { grid-area: list; background: var(--panel); border-right: 1px solid var(--line); overflow: auto; padding: 6px; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font: 12px var(--mono); }
+  .row:hover { background: var(--panel2); } .row.sel { background: #3a3150; }
+  .row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .row .d { font-size: 10px; color: var(--dim); }
+  .dot { width: 7px; height: 7px; border-radius: 9px; background: var(--bad); }
+  main { grid-area: main; overflow: auto; padding: 14px 18px; }
+  #stage { position: relative; max-width: 1100px; background: #000; border-radius: 8px; overflow: hidden; aspect-ratio: 16 / 9; }
+  #stage video, #stage img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  #stage img { display: none; }
+  #stage.still img { display: block; } #stage.still video { visibility: hidden; }
+  #bar { display: flex; gap: 8px; align-items: center; margin: 10px 0 8px; max-width: 1100px; font: 12px var(--mono); color: var(--dim); }
+  button.big { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 7px; padding: 5px 13px; cursor: pointer; font: 600 12px var(--mono); }
+  button.big:hover { border-color: var(--accent); }
+  #tl { width: 100%; max-width: 1100px; height: 130px; display: block; background: var(--panel); border-radius: 8px; cursor: crosshair; }
+  #clip { max-width: 1100px; margin-top: 8px; font: 12px var(--mono); color: var(--dim); min-height: 18px; }
+  #report { margin: 10px 0; padding: 10px 12px; background: var(--panel); border-radius: 8px; font: 11.5px/1.55 var(--mono); white-space: pre; overflow-x: auto; color: var(--dim); max-width: 1100px; }
+  #err { display: none; margin-bottom: 12px; padding: 12px 14px; border-radius: 8px; background: #2b1720; border: 1px solid var(--bad); color: #ffd3d8; font: 12px/1.5 var(--mono); white-space: pre-wrap; max-width: 1100px; }
+  #notes { max-width: 1100px; background: var(--panel); border-radius: 8px; padding: 10px 12px; }
+  #notes h3 { margin: 0 0 6px; font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: 1px; color: var(--dim); }
+  #items { list-style: none; margin: 0 0 8px; padding: 0; font: 12px var(--mono); }
+  #items li { display: flex; gap: 8px; padding: 3px 0; } #items b { color: var(--accent); } #items span { flex: 1; } #items a { cursor: pointer; color: var(--bad); }
+  textarea { width: 100%; min-height: 48px; background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: 12px var(--mono); padding: 6px; }
+  .hint { font: 11px var(--mono); color: var(--dim); }
+</style>
+</head>
+<body>
+<header><span class="logo">reel</span><span class="file" id="file"></span><span class="grow"></span><span class="pill" id="proxy">proxy</span><span class="pill" id="status">…</span></header>
+<div id="list"></div>
+<main>
+  <div id="err"></div>
+  <div id="stage" class="still"><video id="vid" preload="auto" playsinline></video><img id="still" alt=""></div>
+  <div id="bar">
+    <button class="big" id="play">▶ play</button>
+    <span id="time">0.00s</span><span class="grow"></span>
+    <span class="hint">space play · ←/→ frame · ,/. clip · n note · click the strip to scrub</span>
+  </div>
+  <canvas id="tl"></canvas>
+  <div id="clip"></div>
+  <div id="notes">
+    <h3>notes for Claude</h3>
+    <ul id="items"></ul>
+    <textarea id="comment" placeholder="overall comment (optional)"></textarea>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:6px"><button class="big" id="send">send feedback</button><span class="hint" id="sent"></span></div>
+  </div>
+  <div id="report"></div>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

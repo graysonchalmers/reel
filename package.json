@@ -1,0 +1,27 @@
+{
+  "name": "reel-trailers",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Video game trailers as code for AI agents and humans: shots, titles and transitions cut to the music's beat, rendered to MP4 with ffmpeg, with contact sheets, music analysis and a live viewer.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "reel": "./bin/reel.js"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node --test --disable-warning=ExperimentalWarning \"test/**/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.json",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@resvg/resvg-js": "2.6.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "typescript": "^5.9.0"
+  },
+  "keywords": ["trailer", "video", "ffmpeg", "gamedev", "dsl", "ai-agent", "claude-code", "skill"]
+}
