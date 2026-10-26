@@ -10,10 +10,10 @@ _Last updated: 2026-10-25 9:15 p.m. CT, vertical zoom tweak on log bridge + boar
 - `package-lock.json` modified by `npm install`, left uncommitted.
 
 ## 📌 Where we stopped
-Vertical rebuilt with log bridge 1.2x, boardwalk 1.25x (474376b) and sent. The README vertical GIF still shows the older framing (1.15x).
+Vertical rebuilt with log bridge 1.2x, boardwalk 1.25x (474376b) and sent. README GIF rebuilt from it.
 
 ## ▶️ Next concrete step
-Phone-check the vertical. Rebuild the README GIF from the current cut (`--only swamp_vertical --gif`, then the ffmpeg shrink).
+Phone-check the vertical.
 Alt: add `--gif` size option upstream-style in the fork instead of the ffmpeg shrink.
 
 ## ❓ Open questions
