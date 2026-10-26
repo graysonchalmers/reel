@@ -21,23 +21,24 @@ trailer("swamp_teaser", { w: 1920, h: 1080, fps: 30, bpm: 90, music: { src: "out
   title("SWAMP KIT", { beats: 4, size: 160, anim: "punch", in: flash(0.3) }),
   title("SWAMP KIT", { beats: 4, size: 120, sub: "14 PIECES · ALL CODE · KILN + CHIRP + REEL", in: fade(0.2) }))
 
-// 9:16 cutdown: same score and cut grid, every shot re-aimed (x = subject's horizontal spot in the 16:9 source).
-const v2 = (n, x, o = {}) => shot(F + n + ".mp4", { beats: 2, from: 0.3, move: { zoom: [1, 1.06], x }, ...o });
+// 9:16 cutdown: same score and cut grid, shots re-rendered portrait; second arg = zoom (wide pieces stay low so their ends are not clipped).
+const FV = "footage_v/";  // native 720x1280 kiln renders, so tall and wide pieces fit whole
+const v2 = (n, z, o = {}) => shot(FV + n + ".mp4", { beats: 2, from: 0.3, move: { zoom: [z, z * 1.06], y: 0.55 }, ...o });
 trailer("swamp_vertical", { w: 1080, h: 1920, fps: 30, bpm: 90, music: { src: "out/music/score.wav", fadeOut: 1.5 },
   fadeIn: 1, fadeOut: 1.2, grade: { saturation: 1.08, vignette: 0.25 } },
-  shot(F + "bald_cypress.mp4", { beats: 4, speed: 0.9, move: { zoom: [1, 1.08], x: [0.5, 0.56] } }),
+  shot(FV + "bald_cypress.mp4", { beats: 4, speed: 0.9, move: { zoom: [1.1, 1.22], y: 0.5 } }),
   title("SOMETHING GROWS IN THE BAYOU", { beats: 4, size: 70, tracking: 0.14, in: fade(0.4), sfx: sfx(X + "croak.wav", { vol: 0.6 }) }),
-  v2("dead_snag", 0.5, { in: dip(0.3) }),
-  v2("mangrove_roots", 0.55),
-  v2("cattails", 0.5),
-  v2("lily_pads", 0.5, { sfx: sfx(T + "cap_drip.wav", { vol: 0.7 }) }),
-  v2("mossy_boulders", 0.48),
-  v2("fungus_stump", 0.55, { sfx: sfx(X + "bubble.wav") }),
-  v2("log_bridge", [0.4, 0.6]),
-  v2("boardwalk", [0.6, 0.4], { sfx: sfx(X + "whoosh.wav") }),
-  [["stilt_hut", 0.4, 0.5], ["lantern_post", 0.6, 0.53], ["glow_toadstools", 0.4, 0.55], ["stilt_hut", 1.6, 0.5],
-   ["lantern_post", 1.8, 0.53], ["glow_toadstools", 1.5, 0.58], ["stilt_hut", 2.0, 0.5], ["glow_toadstools", 1.9, 0.52]]
-    .map(([n, from, x], i) => shot(F + n + ".mp4", { beats: 1, from, move: { zoom: 1 + i * 0.02, x }, in: i ? undefined : flash(0.15),
+  v2("dead_snag", 1.2, { in: dip(0.3) }),
+  v2("mangrove_roots", 1.2),
+  v2("cattails", 1.25),
+  v2("lily_pads", 1.3, { sfx: sfx(T + "cap_drip.wav", { vol: 0.7 }) }),
+  v2("mossy_boulders", 1.3),
+  v2("fungus_stump", 1.3, { sfx: sfx(X + "bubble.wav") }),
+  v2("log_bridge", 1.15),
+  v2("boardwalk", 1.15, { sfx: sfx(X + "whoosh.wav") }),
+  [["stilt_hut", 0.4, 1.3], ["lantern_post", 0.6, 1.15], ["glow_toadstools", 0.4, 1.3], ["stilt_hut", 1.6, 1.35],
+   ["lantern_post", 1.8, 1.2], ["glow_toadstools", 1.5, 1.4], ["stilt_hut", 2.0, 1.45], ["glow_toadstools", 1.9, 1.5]]
+    .map(([n, from, z], i) => shot(FV + n + ".mp4", { beats: 1, from, move: { zoom: z, y: 0.55 }, in: i ? undefined : flash(0.15),
       sfx: n === "glow_toadstools" && i === 2 ? sfx(T + "spore_puff.wav", { vol: 0.8 }) : undefined })),
   title("SWAMP KIT", { beats: 4, size: 150, anim: "punch", in: flash(0.3) }),
   title("SWAMP KIT", { beats: 4, size: 120, sub: "14 PIECES · ALL CODE\nKILN + CHIRP + REEL", in: fade(0.2) }))

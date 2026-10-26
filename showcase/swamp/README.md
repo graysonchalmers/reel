@@ -6,4 +6,4 @@ Footage: kiln camera moves of Tool-Blockout3D `smoke/swamp.kx.js` (rendered on t
 
 <img src="media/swamp_vertical.gif" alt="Swamp kit teaser, 9:16 vertical" width="270">
 
-16:9 (`swamp_teaser`) and 9:16 (`swamp_vertical`, same score, shots re-aimed) GIFs from `reel build swamp_trailer.rx.js --gif`; the vertical one shrunk to 270 px / 12 fps with ffmpeg to keep it README-sized.
+16:9 (`swamp_teaser`) and 9:16 (`swamp_vertical`, same score, shots re-rendered portrait at 720x1280 so tall and wide pieces fit whole) GIFs from `reel build swamp_trailer.rx.js --gif`; the vertical one shrunk to 270 px / 12 fps with ffmpeg to keep it README-sized.
