@@ -34,8 +34,8 @@ trailer("swamp_vertical", { w: 1080, h: 1920, fps: 30, bpm: 90, music: { src: "o
   v2("lily_pads", 1.3, { sfx: sfx(T + "cap_drip.wav", { vol: 0.7 }) }),
   v2("mossy_boulders", 1.3),
   v2("fungus_stump", 1.3, { sfx: sfx(X + "bubble.wav") }),
-  v2("log_bridge", 1.15),
-  v2("boardwalk", 1.15, { sfx: sfx(X + "whoosh.wav") }),
+  v2("log_bridge", 1.2),
+  v2("boardwalk", 1.25, { sfx: sfx(X + "whoosh.wav") }),
   [["stilt_hut", 0.4, 1.3], ["lantern_post", 0.6, 1.15], ["glow_toadstools", 0.4, 1.3], ["stilt_hut", 1.6, 1.35],
    ["lantern_post", 1.8, 1.2], ["glow_toadstools", 1.5, 1.4], ["stilt_hut", 2.0, 1.45], ["glow_toadstools", 1.9, 1.5]]
     .map(([n, from, z], i) => shot(FV + n + ".mp4", { beats: 1, from, move: { zoom: z, y: 0.55 }, in: i ? undefined : flash(0.15),
