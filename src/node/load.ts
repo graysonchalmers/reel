@@ -5,6 +5,7 @@ import { stripTypeScriptTypes } from "node:module";
 import { dirname, isAbsolute, resolve } from "node:path";
 import * as vm from "node:vm";
 import { ReelError, wrap } from "../core/errors.ts";
+import { fromOtio } from "../core/otio.ts";
 import { Project } from "../core/project.ts";
 
 function compile(code: string, file: string): string {
@@ -14,6 +15,7 @@ function compile(code: string, file: string): string {
 
 /** Load a trailer file from disk. Throws ReelError with a file:line:col location on failure. */
 export function loadProject(file: string): Project {
+  if (/\.otio$/i.test(file)) return loadOtio(file);
   const p = new Project();
   const ctx = vm.createContext({ ...p.env(), console, Math });
   const stack: string[] = [];
@@ -64,4 +66,20 @@ function syntaxAware(e: unknown, file: string, p: Project): ReelError {
     err.message = err.format();
   }
   return err;
+}
+
+/** Load an .otio timeline (the v2 master edit) as a one-trailer Project. */
+export function loadOtio(file: string): Project {
+  const abs = resolve(file);
+  let json: unknown;
+  try { json = JSON.parse(readFileSync(abs, "utf8")); } catch (e) { throw new ReelError(`cannot read OTIO file '${abs}': ${(e as Error).message}`); }
+  const p = new Project();
+  p.addFile(abs);
+  const def = fromOtio(json as Record<string, unknown>, abs.replace(/^.*[\\/]/, ""));
+  const here = (path: string) => (isAbsolute(path) ? path : resolve(dirname(abs), path));
+  for (const c of def.clips) if (c.kind === "shot") c.src = here(c.src);
+  if (def.music) def.music.src = here(def.music.src);
+  p.trailers.set(def.name, def);
+  p.order.push(def.name);
+  return p;
 }
