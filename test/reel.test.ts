@@ -192,3 +192,30 @@ test("overlays are probed, decoded at their size and rendered; --gif writes an a
   assert.equal(b.toString("ascii", 0, 6), "GIF89a");
   assert.equal(b.readUInt16LE(6), 32, "scaled to the asked width");
 });
+
+test("otio round-trip keeps the timeline and the pixels, and NLE trims come back", async () => {
+  const { toOtio, fromOtio } = await import("../src/core/otio.ts");
+  const { loadOtio } = await import("../src/node/load.ts");
+  const { writeFileSync } = await import("node:fs");
+  const src = `trailer("t", { w: 64, h: 36, fps: 30, bpm: 100, music: "click.wav" },
+    shot("bg.mp4", { beats: 2, from: 0.5, move: { zoom: [1, 1.2] }, grade: { saturation: 0.5 } }),
+    title("HI", { beats: 1, sub: "there", in: fade(0.2) }),
+    shot("red.png", { dur: 1, in: slide(0.2, "up") }))`;
+  const a = loadSource(src, "t.rx.js", dir).timeline("t");
+  const o = toOtio(a);
+  assert.equal(o.tracks.children[0].children.filter((c: any) => c.OTIO_SCHEMA === "Transition.1").length, 2);
+  const f = join(dir, "t.otio");
+  writeFileSync(f, JSON.stringify(o));
+  const b = loadOtio(f).timeline("t");
+  assert.deepEqual(b.clips.map((c) => [c.start, c.frames, c.def.kind, c.def.in.type]), a.clips.map((c) => [c.start, c.frames, c.def.kind, c.def.in.type]));
+  assert.equal(b.def.music?.src, a.def.music?.src);
+  const fa = frameAt(a, 0.4, new FrameSource(a, inspect(a).probes)), fb = frameAt(b, 0.4, new FrameSource(b, inspect(b).probes));
+  assert.deepEqual(Buffer.from(fb.data), Buffer.from(fa.data));
+  // An NLE trims shot 1 to 30 frames from 0.2 s and swaps the last two clips.
+  const v = o.tracks.children[0].children;
+  v[0].source_range = { OTIO_SCHEMA: "TimeRange.1", start_time: { rate: 30, value: 6 }, duration: { rate: 30, value: 30 } };
+  const edited = fromOtio({ ...o, tracks: { ...o.tracks, children: [{ ...o.tracks.children[0], children: [v[0], v[3], v[4], v[1], v[2]] }] } });
+  assert.deepEqual(edited.clips.map((c) => [c.kind, c.dur]), [["shot", 1], ["shot", 1], ["title", 0.6]]);
+  assert.equal((edited.clips[0] as any).from, 0.2);
+  assert.equal(edited.clips[1].in.type, "slide");
+});

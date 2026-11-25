@@ -52,6 +52,16 @@ subtitles; `fade dip flash wipe slide zoom` transitions; `overlay` images, GIFs 
 vignette) per clip or for the whole trailer; `sfx` on any clip; letterbox and fades; several trailers
 per file; `--gif` for an animated GIF. Full API: [reference.md](reference.md). Agent guide: [SKILL.md](SKILL.md).
 
+## v2: the .otio master edit
+
+reel v2 (Grayson's fork) makes an **OpenTimelineIO** file the master edit, so the agent, Kdenlive/Shotcut
+and a phone editor all work on one timeline. `reel otio trailer.rx.js` writes `out/<name>.otio`; every
+command (`build`, `info`, `frame`, `serve`) also takes the `.otio` back. Order, names, trims, media and
+transition lengths live in standard OTIO fields (what an NLE edits); reel-only looks (moves, grades,
+titles, overlays) ride in `metadata.reel`. Clips added in an NLE come in as plain shots. Checked against
+the official `opentimelineio` Python library (reads and rewrites our file cleanly).
+v1 (uilianks, `439f264`) stays untouched on `main` history; plan: `docs/V2-PLAN.md`.
+
 ## Commands
 
 ```bash

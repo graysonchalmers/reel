@@ -6,6 +6,7 @@ import { frameAt } from "../core/compose.ts";
 import { ReelError, didYouMean, wrap } from "../core/errors.ts";
 import { png } from "../core/png.ts";
 import type { Project } from "../core/project.ts";
+import { toOtio } from "../core/otio.ts";
 import { loadProject } from "./load.ts";
 import { FrameSource, inspect } from "./media.ts";
 import { gifFromMp4, renderMp4 } from "./render.ts";
@@ -24,6 +25,9 @@ const USAGE = `reel — video game trailers as code
       Write the exact frame at a time, full size, to out/_preview/<name>@<s>.png.
   reel serve <trailer.rx.js> [--port 4340] [--out DIR]
       Live viewer: scrub the timeline, play a proxy with sound, leave notes for the agent.
+  reel otio  <trailer.rx.js> [--out DIR] [--only a,b]
+      Write each trailer as out/<name>.otio, the v2 master edit. Open it in Kdenlive/Shotcut
+      (OTIO adapters) or the web editor; every reel command also accepts the .otio file back.
   reel list  <trailer.rx.js>
       List trailers with their source locations.
 
@@ -119,6 +123,16 @@ export async function main(argv: string[]): Promise<number> {
         mkdirSync(dirname(out), { recursive: true });
         writeFileSync(out, png(im.w, im.h, im.data, (b) => deflateSync(b)));
         console.log(`${name} frame ${Math.round(tf * tl.def.fps)} (${tf.toFixed(3)}s) -> ${out}`);
+        return 0;
+      }
+      case "otio": {
+        const p = loadProject(file);
+        mkdirSync(outDir, { recursive: true });
+        for (const name of pick(p, a.only)) {
+          const out = join(outDir, name + ".otio");
+          writeFileSync(out, JSON.stringify(toOtio(p.timeline(name)), null, 2) + "\n");
+          console.log(`${name} -> ${out}`);
+        }
         return 0;
       }
       case "list": {
