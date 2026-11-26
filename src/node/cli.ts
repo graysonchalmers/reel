@@ -23,7 +23,8 @@ const USAGE = `reel — video game trailers as code
       Clip times, beat alignment, music loudness and hits per clip, warnings.
   reel frame <trailer.rx.js> <name> <seconds> [--out DIR]
       Write the exact frame at a time, full size, to out/_preview/<name>@<s>.png.
-  reel serve <trailer.rx.js> [--port 4340] [--out DIR]
+  reel serve <trailer.rx.js> [--port 4340] [--host 127.0.0.1] [--out DIR]
+      --host 0.0.0.0 (or a tailnet name) lets a phone or iPad on the tailnet open it.
       Live viewer: scrub the timeline, play a proxy with sound, leave notes for the agent.
   reel otio  <trailer.rx.js> [--out DIR] [--only a,b]
       Write each trailer as out/<name>.otio, the v2 master edit. Open it in Kdenlive/Shotcut
@@ -33,7 +34,7 @@ const USAGE = `reel — video game trailers as code
 
 Trailer files may be .js or .ts. Media paths are relative to the file. Needs ffmpeg.`;
 
-interface Args { cmd?: string; file?: string; rest: string[]; out?: string; only?: string[]; proxy?: boolean; preview?: boolean; port?: number; gif?: number }
+interface Args { cmd?: string; file?: string; rest: string[]; out?: string; only?: string[]; proxy?: boolean; preview?: boolean; port?: number; host?: string; gif?: number }
 
 function parse(argv: string[]): Args {
   const a: Args = { rest: [] };
@@ -50,6 +51,7 @@ function parse(argv: string[]): Args {
     else if (v === "--gif") { const n = Number(argv[i + 1]); if (Number.isFinite(n) && n > 0) { a.gif = n; i++; } else a.gif = 480; }
     else if (v === "--no-preview") a.preview = false;
     else if (v === "--port") a.port = Number(val());
+    else if (v === "--host") a.host = val();
     else if (v === "-h" || v === "--help") a.cmd = "help";
     else if (v.startsWith("--")) throw new ReelError(`unknown flag ${v}\n\n${USAGE}`);
     else if (!a.cmd) a.cmd = v;
@@ -144,7 +146,7 @@ export async function main(argv: string[]): Promise<number> {
         return 0;
       }
       case "serve": {
-        const s = await serve(file, { port: a.port, out: outDir });
+        const s = await serve(file, { port: a.port, host: a.host, out: outDir });
         console.log(`reel live viewer: ${s.url}  (watching ${file}; Ctrl+C to stop)`);
         return await new Promise<number>(() => {});
       }

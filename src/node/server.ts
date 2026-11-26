@@ -15,7 +15,8 @@ import { FrameSource, inspect } from "./media.ts";
 import { renderMp4 } from "./render.ts";
 import { clipText, report } from "./report.ts";
 
-export interface ServeOptions { port?: number; out?: string; log?: (line: string) => void }
+export interface ServeOptions {
+  host?: string; port?: number; out?: string; log?: (line: string) => void }
 
 interface ErrInfo { message: string; loc?: string }
 interface Proxy { state: "waiting" | "rendering" | "ready" | "failed"; progress: number; version: number; error?: string }
@@ -184,12 +185,12 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
 
   return new Promise((ok, fail) => {
     server.on("error", fail);
-    server.listen(opts.port ?? 4340, "127.0.0.1", () => {
+    server.listen(opts.port ?? 4340, opts.host ?? "127.0.0.1", () => {
       const addr = server.address();
       const port = typeof addr === "object" && addr ? addr.port : opts.port;
       rebuild();
       ok({
-        url: `http://127.0.0.1:${port}/`,
+        url: `http://${opts.host && opts.host !== "0.0.0.0" ? opts.host : "127.0.0.1"}:${port}/`,
         close: () => {
           abort?.abort();
           clearInterval(ping);
