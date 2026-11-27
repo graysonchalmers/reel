@@ -95,7 +95,8 @@ function thumb(tr, c) {
     im.src = `/api/frame?name=${encodeURIComponent(tr.name)}&t=${(c.start + c.dur * 0.5).toFixed(3)}&w=192&v=${state.version}`;
     thumbs.set(k, im);
   }
-  return im.complete && im.naturalWidth ? im : null;
+  // until the new picture loads, show the last one of the same clip (moves, edits) so nothing blinks
+  return im.complete && im.naturalWidth ? im : byText.get(`${tr.name}|${c.text}`) ?? null;
 }
 const beats = (tr) => { const b = []; if (tr.bpm) for (let s = tr.beat0; s <= tr.dur + 1e-6; s += 60 / tr.bpm) b.push(s); return b; };
 function snap(s, skip) {
