@@ -52,7 +52,7 @@ function setShuttle(s) {
 // ---------------------------------------------------------------- timeline: view, zoom, thumbnails
 const PAD = 8, RULER = 16, CY = 20;
 let zoom = 1, view0 = 0;
-const CH = () => (cv.clientHeight >= 160 ? 70 : cv.clientHeight >= 140 ? 60 : 44);
+const CH = () => (cv.clientHeight >= 160 || (cv.clientHeight >= 100 && !cur()?.music) ? 70 : cv.clientHeight >= 140 ? 60 : 44);
 const pps = () => ((cv.clientWidth - PAD * 2) / cur().dur) * zoom;
 const visDur = () => cur().dur / zoom;
 const clampView = () => { const tr = cur(); if (tr) view0 = Math.max(0, Math.min(tr.dur - visDur(), view0)); };
@@ -475,8 +475,8 @@ function renderClips() {
     const li = document.createElement("li");
     if ((selN || now?.n) === c.n) li.className = "on";
     const last = c.n === tr.clips.length, ro = !state.editable;
-    li.innerHTML = `<span class="k">${c.n}</span><span class="tx" title="Jump to clip ${c.n}">${esc(c.text)}</span><span class="d">${c.dur.toFixed(1)}s</span>` +
-      `<button ${ro ? "disabled" : ""} title="Trim: set exact start and length">✎</button><button ${ro || c.n === 1 ? "disabled" : ""} title="Move earlier">↑</button><button ${ro || last ? "disabled" : ""} title="Move later">↓</button><button ${ro ? "disabled" : ""} title="Duplicate: copy right after">⧉</button><button class="del" ${ro || tr.clips.length === 1 ? "disabled" : ""} title="Delete this clip (undo brings it back)">✕</button>`;
+    li.innerHTML = `<span class="k">${c.n}</span><span class="tx" title="Jump to clip ${c.n}">${esc(c.text)}</span><span class="d">${c.dur.toFixed(1)}s</span><span class="btns">` +
+      `<button ${ro ? "disabled" : ""} title="Trim: set exact start and length">✎</button><button ${ro || c.n === 1 ? "disabled" : ""} title="Move earlier">↑</button><button ${ro || last ? "disabled" : ""} title="Move later">↓</button><button ${ro ? "disabled" : ""} title="Duplicate: copy right after">⧉</button><button class="del" ${ro || tr.clips.length === 1 ? "disabled" : ""} title="Delete this clip (undo brings it back)">✕</button></span>`;
     const [tb, up, dn, dup, del] = li.querySelectorAll("button");
     tb.onclick = () => { trimOpen = trimOpen === c.n ? 0 : c.n; renderClips(); };
     li.querySelector(".tx").onclick = () => { selN = c.n; seek(c.start + Math.min(0.5, c.dur / 2), true); renderClips(); };
@@ -539,6 +539,7 @@ function update() {
   $("err").textContent = err?.message ?? "";
   if (!tr) return;
   document.body.style.setProperty("--ar", `${tr.w} / ${tr.h}`);
+  document.body.classList.toggle("nomusic", !tr.music);
   $("report").textContent = tr.report;
   if (selN > tr.clips.length) selN = 0;
   const p = tr.proxy;
