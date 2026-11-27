@@ -2,104 +2,169 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>reel live</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23222'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%23ffb454' stroke-width='3'/%3E%3Ccircle cx='16' cy='16' r='2.5' fill='%23ffb454'/%3E%3C/svg%3E">
 <style>
-  /* Neutral greys only (zero saturation); colour is kept for the one highlight and status. */
+  /* Neutral greys only (zero saturation). Amber is only the playhead, the selection and the primary
+     action; red is only errors. */
   :root { --bg: #161616; --panel: #1f1f1f; --panel2: #2a2a2a; --line: #383838; --text: #e6e6e6; --dim: #9a9a9a;
-    --accent: #ffb454; --bad: #ff6b6b; --ok: #7bd88f; --sel: #3a3a3a; --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace; }
+    --accent: #ffb454; --bad: #ff6b6b; --sel: #333333; --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace; }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, sans-serif; }
-  body { display: grid; grid-template: "head head" 44px "list main" 1fr / 220px 1fr; }
-  header { grid-area: head; display: flex; align-items: center; gap: 14px; padding: 0 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
-  .logo { font: 700 15px var(--mono); color: var(--accent); letter-spacing: 1px; }
-  .file { font-family: var(--mono); color: var(--dim); }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, sans-serif; overflow: hidden; }
+  button { font: 600 12px var(--mono); color: var(--text); background: var(--panel2); border: 1px solid var(--line); border-radius: 7px; min-height: 40px; min-width: 40px; padding: 0 12px; cursor: pointer; }
+  button:hover { border-color: #5a5a5a; } button:disabled { opacity: .35; cursor: default; }
+  button.primary { border-color: var(--accent); color: var(--accent); }
+  /* Layout: player + timeline never scroll; only the lower/side panels do. */
+  body { display: grid; height: 100dvh;
+    grid-template: "head head head" 48px "bin stage side" minmax(0, 1fr) "tl tl tl" auto / 280px minmax(0, 1fr) 360px; }
+  header { grid-area: head; display: flex; align-items: center; gap: 12px; padding: 0 12px; background: var(--panel); border-bottom: 1px solid var(--line); min-width: 0; }
+  .logo { font: 700 15px var(--mono); color: var(--text); letter-spacing: 1px; }
+  .file { font: 11px var(--mono); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .grow { flex: 1; }
-  .pill { padding: 2px 9px; border-radius: 99px; font: 600 11px var(--mono); background: var(--panel2); color: var(--dim); }
-  .pill.ok { color: var(--ok); } .pill.bad { color: var(--bad); }
-  #list { grid-area: list; background: var(--panel); border-right: 1px solid var(--line); overflow: auto; padding: 6px; }
-  .row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font: 12px var(--mono); }
-  .row:hover { background: var(--panel2); } .row.sel { background: var(--sel); box-shadow: inset 3px 0 var(--accent); }
-  .row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .row .d { font-size: 10px; color: var(--dim); }
+  .pill { padding: 2px 9px; border-radius: 99px; font: 600 11px var(--mono); background: var(--panel2); color: var(--dim); white-space: nowrap; }
+  .pill.bad { color: var(--bad); }
+  #list { display: flex; gap: 6px; overflow-x: auto; min-width: 0; }
+  .row { flex: none; display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 10px; border-radius: 7px; cursor: pointer; font: 12px var(--mono); border: 1px solid transparent; }
+  .row:hover { background: var(--panel2); } .row.sel { background: var(--sel); border-color: var(--accent); }
+  .row .d { font-size: 10px; color: var(--dim); }
   .dot { width: 7px; height: 7px; border-radius: 9px; background: var(--bad); }
-  main { grid-area: main; overflow: auto; padding: 14px 18px; }
-  #stage { position: relative; max-width: 1100px; background: #000; border-radius: 8px; overflow: hidden; aspect-ratio: 16 / 9; }
+  #bin { grid-area: bin; background: var(--panel); border-right: 1px solid var(--line); overflow: auto; padding: 10px; min-height: 0; }
+  #stagewrap { grid-area: stage; display: flex; flex-direction: column; min-height: 0; min-width: 0; padding: 10px; }
+  #stage { position: relative; flex: 1; min-height: 0; background: #000; border-radius: 8px; overflow: hidden; }
   #stage video, #stage img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
   #stage img { display: none; }
   #stage.still img { display: block; } #stage.still video { visibility: hidden; }
-  #bar { display: flex; gap: 8px; align-items: center; margin: 10px 0 8px; max-width: 1100px; font: 12px var(--mono); color: var(--dim); }
-  button.big { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 7px; padding: 5px 13px; cursor: pointer; font: 600 12px var(--mono); }
-  button.big:hover { border-color: var(--accent); }
-  #tl { width: 100%; max-width: 1100px; height: 130px; display: block; background: var(--panel); border-radius: 8px; cursor: crosshair; }
-  #clip { max-width: 1100px; margin-top: 8px; font: 12px var(--mono); color: var(--dim); min-height: 18px; }
-  #report { margin: 10px 0; padding: 10px 12px; background: var(--panel); border-radius: 8px; font: 11.5px/1.55 var(--mono); white-space: pre; overflow-x: auto; color: var(--dim); max-width: 1100px; }
-  #err { display: none; margin-bottom: 12px; padding: 12px 14px; border-radius: 8px; background: #262626; border: 1px solid var(--bad); color: #f0f0f0; font: 12px/1.5 var(--mono); white-space: pre-wrap; max-width: 1100px; }
-  #notes { max-width: 1100px; background: var(--panel); border-radius: 8px; padding: 10px 12px; }
-  #notes h3 { margin: 0 0 6px; font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: 1px; color: var(--dim); }
-  #items { list-style: none; margin: 0 0 8px; padding: 0; font: 12px var(--mono); }
-  #items li { display: flex; gap: 8px; padding: 3px 0; } #items b { color: var(--accent); } #items span { flex: 1; } #items a { cursor: pointer; color: var(--bad); }
-  textarea { width: 100%; min-height: 48px; background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: 12px var(--mono); padding: 6px; }
+  #err { display: none; margin-bottom: 8px; padding: 10px 12px; border-radius: 8px; background: #262626; border: 1px solid var(--bad); color: #f0f0f0; font: 12px/1.5 var(--mono); white-space: pre-wrap; max-height: 30vh; overflow: auto; }
+  #side { grid-area: side; display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--line); min-height: 0; }
+  #grab { display: none; }
+  #tabs { display: flex; gap: 4px; padding: 6px; border-bottom: 1px solid var(--line); flex: none; }
+  #tabs button { flex: 1; background: transparent; border-color: transparent; color: var(--dim); }
+  #tabs button.on { color: var(--text); background: var(--panel2); border-color: var(--line); }
+  #panels { flex: 1; overflow: auto; padding: 10px 12px; min-height: 0; overscroll-behavior: contain; }
+  .panel { display: none; } .panel.on { display: block; }
+  #tlwrap { grid-area: tl; background: var(--panel); border-top: 1px solid var(--line); padding: 6px 10px 10px; min-width: 0; }
+  #bar { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; font: 12px var(--mono); color: var(--dim); flex-wrap: wrap; }
+  #time { min-width: 150px; }
+  #tl { width: 100%; height: 170px; display: block; background: #1a1a1a; border-radius: 8px; touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none; }
+  #clip { margin-top: 6px; font: 12px var(--mono); color: var(--dim); min-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  h3 { margin: 0 0 8px; font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: 1px; color: var(--dim); display: flex; align-items: center; gap: 8px; }
   .hint { font: 11px var(--mono); color: var(--dim); }
-  #edit { max-width: 1100px; margin: 8px 0 10px; background: var(--panel); border-radius: 8px; padding: 10px 12px; }
-  #edit h3 { margin: 0 0 6px; font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: 1px; color: var(--dim); display: flex; align-items: center; gap: 8px; }
-  #clips { list-style: none; margin: 0; padding: 0; }
-  #clips li { display: flex; align-items: center; gap: 8px; padding: 6px 4px; border-top: 1px solid var(--line); font: 12px var(--mono); }
-  #clips li.on { background: var(--sel); }
-  #clips .k { width: 26px; color: var(--dim); } #clips .tx { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+  #clips { list-style: none; margin: 6px 0 0; padding: 0; }
+  #clips li { display: flex; align-items: center; gap: 6px; padding: 4px 4px; border-top: 1px solid var(--line); font: 12px var(--mono); }
+  #clips li.on { background: var(--sel); box-shadow: inset 3px 0 var(--accent); }
+  #clips .k { width: 22px; color: var(--dim); text-align: right; } #clips .tx { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; min-height: 40px; line-height: 40px; }
   #clips .d { color: var(--dim); font-size: 11px; }
-  #clips button, #undo { min-width: 40px; min-height: 36px; background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 7px; font: 600 14px var(--mono); cursor: pointer; }
-  #clips button:hover, #undo:hover { border-color: var(--accent); } #clips button:disabled, #undo:disabled { opacity: .35; }
+  #clips button { padding: 0; font-size: 14px; }
   #clips button.del:hover { border-color: var(--bad); color: var(--bad); }
-  #clips li.trim { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; background: var(--panel2); }
+  #clips li.trim { flex-wrap: wrap; gap: 10px; background: var(--panel2); padding: 8px; }
   #clips li.trim label { display: flex; gap: 6px; align-items: center; color: var(--dim); }
-  #clips li.trim input { width: 80px; min-height: 36px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: 14px var(--mono); padding: 4px 6px; }
-  #clips button.go { border-color: var(--accent); color: var(--accent); padding: 0 12px; }
-  #addbtn { min-height: 36px; margin-top: 8px; background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 7px; font: 600 13px var(--mono); padding: 0 14px; cursor: pointer; }
-  #picker { display: none; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; margin-top: 8px; }
-  #picker.open { display: grid; }
+  input[type=number] { width: 84px; min-height: 40px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: 14px var(--mono); padding: 4px 6px; }
+  #picker { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; margin-top: 8px; }
   #picker figure { margin: 0; background: var(--panel2); border: 1px solid var(--line); border-radius: 7px; overflow: hidden; cursor: pointer; }
-  #picker figure:hover { border-color: var(--accent); }
+  #picker figure:hover { border-color: #6a6a6a; }
   #picker img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; display: block; background: #000; }
   #picker figcaption { padding: 4px 6px; font: 11px var(--mono); color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #report { white-space: pre-wrap; overflow-wrap: anywhere; }
-  /* Tablet / phone: the trailer list becomes a row of chips over the player. */
-  @media (max-width: 900px) {
-    body { grid-template: "head" 44px "list" auto "main" 1fr / 1fr; }
-    #list { display: flex; gap: 6px; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); }
-    #list .row { flex: none; } .hint.keys { display: none; }
-    main { padding: 10px 12px; }
+  #items { list-style: none; margin: 0 0 8px; padding: 0; font: 12px var(--mono); }
+  #items li { display: flex; gap: 8px; align-items: center; min-height: 40px; } #items b { color: var(--text); } #items span { flex: 1; cursor: pointer; }
+  textarea { width: 100%; min-height: 64px; background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: 12px var(--mono); padding: 6px; }
+  #report { font: 11.5px/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dim); }
+  /* Long-press / right-click menu on a timeline clip. */
+  #menu { display: none; position: fixed; z-index: 20; min-width: 200px; background: #262626; border: 1px solid #4a4a4a; border-radius: 9px; padding: 5px; box-shadow: 0 10px 30px #000a; }
+  #menu.open { display: block; }
+  #menu .mh { font: 600 11px var(--mono); color: var(--dim); padding: 6px 10px; }
+  #menu button { display: block; width: 100%; text-align: left; background: transparent; border-color: transparent; font-size: 13px; }
+  #menu button:hover:not(:disabled) { background: var(--panel2); }
+  #menu button.del:hover:not(:disabled) { color: var(--bad); }
+  /* Pinned toast after each edit. */
+  #toast { position: fixed; z-index: 30; left: 50%; bottom: 16px; transform: translateX(-50%); display: none; align-items: center; gap: 10px; padding: 6px 6px 6px 14px; background: #2c2c2c; border: 1px solid #4a4a4a; border-radius: 10px; font: 12px var(--mono); box-shadow: 0 8px 24px #000a; max-width: calc(100vw - 32px); }
+  #toast.open { display: flex; } #toast.bad { border-color: var(--bad); color: var(--bad); }
+  #toast .msg { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* Tablet / phone portrait: player and timeline pinned on top, the inspector is a bottom sheet
+     that swipes up over the player. */
+  @media (max-width: 1099px) and (orientation: portrait) {
+    body { grid-template: "head" 48px "stage" auto "tl" auto "side" minmax(0, 1fr) / 100%; }
+    #bin { display: none; }
+    #stagewrap { padding: 8px 10px 0; } #stage { flex: none; aspect-ratio: var(--ar, 16 / 9); max-height: 46dvh; }
+    #tlwrap { border-top: 0; padding-top: 8px; } #tl { height: 150px; }
+    #side { border-left: 0; border-top: 1px solid var(--line); border-radius: 14px 14px 0 0; transition: top .25s; }
+    #grab { display: flex; justify-content: center; align-items: center; height: 26px; flex: none; cursor: grab; touch-action: none; }
+    #grab::before { content: ""; width: 44px; height: 5px; border-radius: 9px; background: #555; }
+    body.sheet #side { position: fixed; left: 0; right: 0; bottom: 0; top: 18dvh; z-index: 10; box-shadow: 0 -10px 30px #000c; }
+    .keys { display: none; }
   }
+  /* Phone landscape: player left (timeline under it), clips right. */
+  @media (max-height: 560px) and (orientation: landscape) {
+    body { grid-template: "head head" 40px "stage side" minmax(0, 1fr) "tl side" auto / minmax(0, 1fr) 300px; }
+    #bin { display: none; } header { gap: 8px; }
+    #stagewrap { padding: 6px; } #tl { height: 110px; } #clip { display: none; }
+    .keys { display: none; }
+  }
+  @media (min-width: 1100px) { .tab-media { display: none; } }
 </style>
 </head>
 <body>
-<header><span class="logo">reel</span><span class="file" id="file"></span><span class="grow"></span><span class="pill" id="proxy">proxy</span><span class="pill" id="status">…</span></header>
-<div id="list"></div>
-<main>
+<header>
+  <span class="logo" title="reel live viewer: edits save to the .otio master and re-render">reel</span>
+  <div id="list" title="Trailers in this file: tap one to open it"></div>
+  <span class="file" id="file" title="The served file, its build version and build time"></span>
+  <span class="grow"></span>
+  <span class="pill" id="proxy" title="Preview video: renders in the background after each change; exact stills show meanwhile">proxy</span>
+  <span class="pill" id="status" title="Build status of the trailer file">…</span>
+</header>
+<aside id="bin"></aside>
+<section id="stagewrap">
   <div id="err"></div>
-  <div id="stage" class="still"><video id="vid" preload="auto" playsinline></video><img id="still" alt=""></div>
+  <div id="stage" class="still" title="Preview: the proxy video plays with sound; exact composed stills show while it renders or when stepping"><video id="vid" preload="auto" playsinline></video><img id="still" alt=""></div>
+</section>
+<section id="tlwrap">
   <div id="bar">
-    <button class="big" id="play">▶ play</button>
-    <span id="time">0.00s</span><span class="grow"></span>
-    <span class="hint keys">space play · ←/→ frame · ,/. clip · n note · click the strip to scrub</span>
+    <button class="primary" id="play" title="Play / pause (Space). J/K/L shuttle on a keyboard">▶ play</button>
+    <span id="time" title="Playhead time and frame">0.00s</span>
+    <button id="undo" title="Undo the last edit (Ctrl/Cmd-Z)">↶</button>
+    <button id="redo" title="Redo the edit you just undid (Shift-Ctrl/Cmd-Z)">↷</button>
+    <button id="zoomout" title="Zoom the timeline out (Ctrl-wheel or pinch also zoom)">−</button>
+    <button id="zoomin" title="Zoom the timeline in (Ctrl-wheel or pinch also zoom)">＋</button>
+    <span class="grow"></span>
+    <span class="hint keys">J/K/L shuttle · I/O trim · Del · Alt-↑↓ move · drag clips to reorder, edges to trim · right-click for more</span>
   </div>
-  <canvas id="tl"></canvas>
+  <canvas id="tl" title="Timeline. Drag a clip to reorder it, drag its edges to trim (snaps to beats and cuts). Right-click or long-press a clip for trim, duplicate, split, delete. Click the ruler or waveform to scrub; Shift-drag there to mark a note. Ctrl-wheel or pinch to zoom."></canvas>
   <div id="clip"></div>
-  <div id="edit">
-    <h3>clips <span class="grow"></span><button id="undo" title="undo last edit">↶ undo</button></h3>
-    <div class="hint" id="edithint"></div>
-    <ul id="clips"></ul>
-    <button id="addbtn">＋ add clip</button>
-    <div class="hint" id="pickhint"></div>
-    <div id="picker"></div>
+</section>
+<aside id="side">
+  <div id="grab" title="Swipe up to open the inspector, down to close it"></div>
+  <div id="tabs">
+    <button data-tab="clips" class="on" title="Clip list: trim, move, delete with buttons">clips</button>
+    <button data-tab="media" class="tab-media" title="Media files you can add as new shots">media</button>
+    <button data-tab="notes" title="Notes for Claude: mark moments and send feedback">notes</button>
+    <button data-tab="report" title="Build report: timing, beats and warnings">report</button>
   </div>
-  <div id="notes">
-    <h3>notes for Claude</h3>
-    <ul id="items"></ul>
-    <textarea id="comment" placeholder="overall comment (optional)"></textarea>
-    <div style="display:flex;gap:8px;align-items:center;margin-top:6px"><button class="big" id="send">send feedback</button><span class="hint" id="sent"></span></div>
+  <div id="panels">
+    <div class="panel on" id="p-clips">
+      <h3>clips</h3>
+      <div class="hint" id="edithint"></div>
+      <ul id="clips"></ul>
+    </div>
+    <div class="panel" id="p-media">
+      <div id="mediabox">
+        <h3>media</h3>
+        <div class="hint" id="pickhint"></div>
+        <div id="picker"></div>
+      </div>
+    </div>
+    <div class="panel" id="p-notes">
+      <h3>notes for Claude</h3>
+      <ul id="items"></ul>
+      <textarea id="comment" placeholder="overall comment (optional)" title="An overall comment sent with your notes"></textarea>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:6px"><button class="primary" id="send" title="Send the notes to the project so Claude can read them">send feedback</button><span class="hint" id="sent"></span></div>
+      <div class="hint" style="margin-top:8px">n adds a note at the playhead; Shift-drag the timeline ruler to mark a range.</div>
+    </div>
+    <div class="panel" id="p-report"><div id="report"></div></div>
   </div>
-  <div id="report"></div>
-</main>
+</aside>
+<div id="menu" role="menu"></div>
+<div id="toast" role="status"><span class="msg" id="toastmsg"></span><button id="toastundo" class="primary" title="Undo this edit">undo</button><button id="toastredo" title="Redo the edit you undid">redo</button><button id="toastx" title="Dismiss">✕</button></div>
 <script src="/app.js"></script>
 </body>
 </html>
