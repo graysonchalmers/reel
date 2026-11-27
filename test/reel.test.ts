@@ -336,13 +336,14 @@ test("otio edits: set, change and remove the music", async () => {
 
 test("a clip badge draws a grey plate in the corner only when set, and round-trips through otio", async () => {
   const { toOtio, fromOtio, editOtio } = await import("../src/core/otio.ts");
-  const p = loadSource(`trailer("t", { w: 100, h: 100, fps: 10 }, shot("a.png", { dur: 1 }), shot("a.png", { dur: 1, badge: "10x" }))`, "t.rx.js", dir);
+  const p = loadSource(`trailer("t", { w: 100, h: 100, fps: 10, letterbox: 2 }, shot("a.png", { dur: 1 }), shot("a.png", { dur: 1, badge: "10x" }))`, "t.rx.js", dir);
   const tl = p.timeline("t");
   const src: Sources = { shot: () => solid(255, 0, 0), text: () => image(4, 4) };
   const plain = frameAt(tl, 0.5, src), badged = frameAt(tl, 1.5, src);
   const red = (c: number[]) => c[0] > 240 && c[1] < 10 && c[2] < 10;
-  assert.ok(red(px(plain, 92, 5)), "no badge: corner is the shot");
-  const b = px(badged, 92, 5);
+  assert.ok(red(px(plain, 92, 30)), "no badge: corner is the shot");
+  const b = px(badged, 92, 30);
+  assert.deepEqual(px(badged, 92, 5), [0, 0, 0], "the letterbox bar stays black: the badge sits inside it");
   assert.ok(b[0] < 120 && Math.abs(b[0] - b[1]) < 4 && Math.abs(b[1] - b[2]) < 4, `badge plate is grey, got ${b}`);
   assert.ok(red(px(badged, 10, 50)), "the rest of the frame is untouched");
   let o = toOtio(tl);
