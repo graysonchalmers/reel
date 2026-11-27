@@ -135,7 +135,7 @@ function draw() {
     }
     if (c.inDur) { g.fillStyle = "rgba(255,255,255,0.55)"; g.beginPath(); g.moveTo(x0, CY + ch); g.lineTo(x0 + Math.min(x1 - x0, c.inDur * pps()), CY + ch); g.lineTo(x0, CY + ch - 10); g.fill(); }
     if (c.in !== "cut" && x1 - x0 > 60) { const lbl = `${c.in} ${c.inDur.toFixed(2)}`; g.fillStyle = "rgba(0,0,0,0.6)"; g.fillRect(x0, CY + ch - 15, g.measureText(lbl).width + 16, 15); g.fillStyle = "#d8d8d8"; g.fillText(lbl, x0 + 12, CY + ch - 4); }
-    if (c.badge && x1 - x0 > 40) { const bw = g.measureText(c.badge).width + 8; g.fillStyle = "#2a2a2a"; g.fillRect(x1 - bw - 3, CY + 2, bw, 14); g.fillStyle = "#ffffff"; g.fillText(c.badge, x1 - bw + 1, CY + 13); }
+    if (c.badge && x1 - x0 > 40) { const bw = g.measureText(c.badge).width + 8; g.fillStyle = "#2a2a2a"; g.fillRect(x1 - bw - 3, CY + ch - 17, bw, 14); g.fillStyle = "#ffffff"; g.fillText(c.badge, x1 - bw + 1, CY + ch - 6); }
     g.fillStyle = "#f0f0f0"; if (x1 - x0 > 18) g.fillText(x1 - x0 > 70 ? `${c.n} ${c.text}`.slice(0, Math.floor((x1 - x0 - 6) / 7)) : String(c.n), x0 + 4, CY + 12);
     g.restore();
     const isSel = selN === c.n;
