@@ -201,6 +201,18 @@ function drawClip(dst: Img, tl: Timeline, src: Sources, c: Clip, u: number, alph
     if (clipX >= W) drawTitle(dst, tl, src, c, d, u, alpha);
   }
   if (d.grade) grade(dst, d.grade, clipX);
+  if (d.badge && clipX >= W) drawBadge(dst, src, d.badge, W, H, alpha);
+}
+
+/** Corner badge: a grey plate with white text, top right, sized to the frame height. */
+const BADGE_STYLE: TextStyle = { size: 32, font: "sans-serif", weight: 700, color: "#ffffff", tracking: 0.02, pos: "center", shadow: false };
+function drawBadge(dst: Img, src: Sources, text: string, W: number, H: number, alpha: number): void {
+  const size = Math.max(6, Math.round(H * 0.035)), pad = Math.max(2, Math.round(size * 0.45)), m = Math.max(2, Math.round(H * 0.03));
+  const im = src.text({ text, style: { ...BADGE_STYLE, size }, maxW: W * 0.3 });
+  const pw = Math.max(im.w + pad * 2, size * 2), ph = Math.max(im.h, size) + pad;
+  const x1 = W - m, x0 = Math.max(0, x1 - pw), y0 = m, y1 = Math.min(H, y0 + ph);
+  fill(dst, "#2a2a2a", alpha, Math.round(x0), Math.round(x1), Math.round(y0), Math.round(y1));
+  draw(dst, im, 1, Math.round((x0 + x1 - im.w) / 2), Math.round((y0 + y1 - im.h) / 2), alpha);
 }
 
 function drawTitle(dst: Img, tl: Timeline, src: Sources, c: Clip, d: TitleDef, u: number, alpha: number): void {

@@ -289,3 +289,65 @@ test("the live viewer edits the .otio with undo and redo, and a new edit clears 
     s.close();
   }
 });
+
+test("otio edits: title text, sub and length", async () => {
+  const { toOtio, fromOtio, editOtio } = await import("../src/core/otio.ts");
+  const a = loadSource(`trailer("t", { w: 64, h: 36, fps: 30 }, shot("red.png", { dur: 1 }), title("A", { dur: 1, sub: "old" }))`, "t.rx.js", dir).timeline("t");
+  let o = editOtio(toOtio(a), { op: "title", n: 2, text: "NEW", sub: "line two", dur: 2 });
+  let c: any = fromOtio(o).clips[1];
+  assert.deepEqual([c.text, c.sub, c.dur], ["NEW", "line two", 2]);
+  o = editOtio(o, { op: "title", n: 2, sub: null });
+  c = fromOtio(o).clips[1];
+  assert.equal(c.sub, undefined);
+  assert.throws(() => editOtio(o, { op: "title", n: 1, text: "x" }), /not a title/);
+  assert.throws(() => editOtio(o, { op: "title", n: 2, text: " " }), /empty/);
+});
+
+test("otio edits: pick the transition into a clip", async () => {
+  const { toOtio, fromOtio, editOtio } = await import("../src/core/otio.ts");
+  const { Project } = await import("../src/core/project.ts");
+  const a = loadSource(`trailer("t", { w: 64, h: 36, fps: 30 }, shot("red.png", { dur: 1 }), title("A", { dur: 1, in: fade(0.2) }), title("B", { dur: 1 }))`, "t.rx.js", dir).timeline("t");
+  const o = toOtio(a);
+  const ins = (x: any) => fromOtio(x).clips.map((c: any) => [c.in.type, +c.in.dur.toFixed(2), c.in.dir]);
+  assert.deepEqual(ins(editOtio(o, { op: "trans", n: 3, type: "slide", dur: 0.4, dir: "up" }))[2], ["slide", 0.4, "up"]);
+  assert.deepEqual(ins(editOtio(o, { op: "trans", n: 2, type: "cut" }))[1], ["cut", 0, "left"]);
+  assert.deepEqual(ins(editOtio(o, { op: "trans", n: 2, type: "dip" }))[1].slice(0, 2), ["dip", 0.6]);
+  assert.deepEqual(ins(editOtio(o, { op: "trans", n: 1, type: "flash", dur: 0.2 }))[0].slice(0, 2), ["flash", 0.2]);
+  assert.throws(() => editOtio(o, { op: "trans", n: 1, type: "fade" }), /first clip/);
+  assert.throws(() => editOtio(o, { op: "trans", n: 2, type: "spin" as any }), /one of/);
+  const p = new Project(); p.trailers.set("t", fromOtio(editOtio(o, { op: "trans", n: 3, type: "wipe", dur: 0.3 }))); p.order.push("t");
+  assert.equal(p.timeline("t").clips[2].def.in.type, "wipe");
+});
+
+test("otio edits: set, change and remove the music", async () => {
+  const { toOtio, fromOtio, editOtio } = await import("../src/core/otio.ts");
+  const a = loadSource(`trailer("t", { w: 64, h: 36, fps: 30 }, shot("red.png", { dur: 1 }))`, "t.rx.js", dir).timeline("t");
+  let o = toOtio(a);
+  assert.equal(fromOtio(o).music, undefined);
+  o = editOtio(o, { op: "music", src: "/m/song.wav", vol: 0.5 });
+  assert.deepEqual(fromOtio(o).music, { src: "/m/song.wav", from: 0, vol: 0.5, fadeOut: 1.5 });
+  o = editOtio(o, { op: "music", vol: 0.8 });
+  assert.equal(fromOtio(o).music!.vol, 0.8);
+  assert.equal(fromOtio(o).music!.src, "/m/song.wav");
+  o = editOtio(o, { op: "music", src: null });
+  assert.equal(fromOtio(o).music, undefined);
+  assert.throws(() => editOtio(o, { op: "music", vol: 1 }), /media file/);
+});
+
+test("a clip badge draws a grey plate in the corner only when set, and round-trips through otio", async () => {
+  const { toOtio, fromOtio, editOtio } = await import("../src/core/otio.ts");
+  const p = loadSource(`trailer("t", { w: 100, h: 100, fps: 10 }, shot("a.png", { dur: 1 }), shot("a.png", { dur: 1, badge: "10x" }))`, "t.rx.js", dir);
+  const tl = p.timeline("t");
+  const src: Sources = { shot: () => solid(255, 0, 0), text: () => image(4, 4) };
+  const plain = frameAt(tl, 0.5, src), badged = frameAt(tl, 1.5, src);
+  const red = (c: number[]) => c[0] > 240 && c[1] < 10 && c[2] < 10;
+  assert.ok(red(px(plain, 92, 5)), "no badge: corner is the shot");
+  const b = px(badged, 92, 5);
+  assert.ok(b[0] < 120 && Math.abs(b[0] - b[1]) < 4 && Math.abs(b[1] - b[2]) < 4, `badge plate is grey, got ${b}`);
+  assert.ok(red(px(badged, 10, 50)), "the rest of the frame is untouched");
+  let o = toOtio(tl);
+  assert.equal((fromOtio(o).clips[1] as any).badge, "10x");
+  o = editOtio(o, { op: "badge", n: 1, badge: "1x" });
+  o = editOtio(o, { op: "badge", n: 2, badge: null });
+  assert.deepEqual(fromOtio(o).clips.map((c: any) => c.badge), ["1x", undefined]);
+});
