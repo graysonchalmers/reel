@@ -352,3 +352,62 @@ test("a clip badge draws a grey plate in the corner only when set, and round-tri
   o = editOtio(o, { op: "badge", n: 2, badge: null });
   assert.deepEqual(fromOtio(o).clips.map((c: any) => c.badge), ["1x", undefined]);
 });
+
+test("the viewer is an installable app: manifest, icons, apple meta tags", async () => {
+  const file = join(dir, "pwa.rx.js");
+  writeFileSync(file, `trailer("t", { w: 64, h: 36 }, shot("red.png", { dur: 1 }))`);
+  const s = await serve(file, { port: 0, log: () => {} });
+  try {
+    const m = await (await fetch(s.url + "manifest.webmanifest")).json();
+    assert.equal(m.display, "fullscreen");
+    for (const ic of m.icons) assert.equal((await fetch(s.url + ic.src.slice(1))).status, 200);
+    const png = Buffer.from(await (await fetch(s.url + "apple-touch-icon.png")).arrayBuffer());
+    assert.equal(png.subarray(1, 4).toString(), "PNG");
+    const html = await (await fetch(s.url)).text();
+    for (const tag of ['rel="manifest"', 'name="apple-mobile-web-app-capable"', 'rel="apple-touch-icon"']) assert.ok(html.includes(tag), tag);
+  } finally { s.close(); }
+});
+
+test("render full: one at a time, saved under out/_full, then the publish command's link", async () => {
+  const sub = join(dir, "full");
+  spawnSync("mkdir", ["-p", sub]);
+  const file = join(sub, "full.rx.js");
+  writeFileSync(file, `trailer("t", { w: 64, h: 36, fps: 10 }, shot("${join(dir, "red.png")}", { dur: 0.5 }))`);
+  const s = await serve(file, { port: 0, log: () => {}, publish: "test -s {file} && echo GALLERY: http://gallery.test/x; echo VIDEO: http://gallery.test/v.mp4" });
+  const state = async () => {
+    const r = await fetch(s.url + "events"), rd = r.body!.getReader(); let txt = "";
+    while (!txt.includes("\n\n")) txt += new TextDecoder().decode((await rd.read()).value);
+    rd.cancel(); return JSON.parse(/data: (.*)/.exec(txt)![1]);
+  };
+  try {
+    const a = await fetch(s.url + "api/render?name=t", { method: "POST" });
+    assert.equal(a.status, 202);
+    assert.equal((await fetch(s.url + "api/render?name=t", { method: "POST" })).status, 409);
+    let st;
+    for (let i = 0; i < 200; i++) { st = await state(); if (st.full?.state === "done" || st.full?.state === "failed") break; await new Promise((r) => setTimeout(r, 100)); }
+    assert.equal(st.full.state, "done", st.full.error);
+    assert.equal(st.full.url, "http://gallery.test/x");
+    assert.equal(st.full.video, "http://gallery.test/v.mp4");
+    const dl = await fetch(s.url + "api/full?f=" + encodeURIComponent(st.full.file));
+    assert.equal(dl.headers.get("content-type"), "video/mp4");
+    assert.equal((await fetch(s.url + "api/full?f=../../etc/passwd")).status, 404);
+  } finally { s.close(); }
+});
+
+test("every button and form control in the viewer explains itself with a title", () => {
+  const html = readFileSync(new URL("../src/viewer/index.html", import.meta.url), "utf8");
+  const js = readFileSync(new URL("../src/viewer/app.js", import.meta.url), "utf8");
+  const bad: string[] = [];
+  for (const src of [html, js]) for (const m of src.matchAll(/<(button|input|select|textarea)\b[^>]*>/g)) {
+    const tag = m[0];
+    if (/type="hidden"/.test(tag) || /\btitle=/.test(tag)) continue;
+    // a control inside a <label title=...> is explained by its label
+    const before = src.slice(Math.max(0, m.index! - 300), m.index);
+    const lab = before.lastIndexOf("<label"), close = before.lastIndexOf("</label>");
+    if (lab > close && /<label[^>]*\btitle=/.test(before.slice(lab))) continue;
+    bad.push(tag.slice(0, 80));
+  }
+  // buttons made with createElement must get a .title before they are added
+  for (const m of js.matchAll(/const (\w+) = document\.createElement\("button"\)/g)) if (!new RegExp(`${m[1]}\\.title\\s*=`).test(js)) bad.push(`createElement button ${m[1]}`);
+  assert.deepEqual(bad, [], "controls without a tooltip");
+});

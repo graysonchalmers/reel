@@ -14,18 +14,28 @@ const canEdit = () => !!state?.editable && !!cur() && !cur().error;
 // ---------------------------------------------------------------- picture
 // The proxy video plays with sound; while it isn't ready (or when stepping), the server's exact
 // composed frame is shown instead.
-let stillTimer;
-function showStill() {
+// While scrubbing, cheap 240 px frames (one request in flight, the newest wins); the exact
+// 960 px frame when the finger lifts.
+let stillTimer, fastBusy = false, fastWant;
+const frameUrl = (tr, w) => `/api/frame?name=${encodeURIComponent(tr.name)}&t=${t.toFixed(4)}&w=${w}&v=${state.version}`;
+function showStill(fast) {
   const tr = cur(); if (!tr || tr.error) return;
   clearTimeout(stillTimer);
-  stillTimer = setTimeout(() => { still.src = `/api/frame?name=${encodeURIComponent(tr.name)}&t=${t.toFixed(4)}&w=960&v=${state.version}`; }, 40);
   $("stage").classList.add("still");
+  if (fast) {
+    fastWant = frameUrl(tr, 240);
+    if (!fastBusy) { fastBusy = true; still.src = fastWant; fastWant = undefined; }
+    return;
+  }
+  fastWant = undefined;
+  stillTimer = setTimeout(() => { still.src = frameUrl(tr, 960); }, 40);
 }
-function seek(nt, exact) {
+still.onload = still.onerror = () => { fastBusy = false; if (fastWant) { fastBusy = true; still.src = fastWant; fastWant = undefined; } };
+function seek(nt, exact, fast) {
   const tr = cur(); if (!tr) return;
   t = Math.max(0, Math.min(tr.dur - 1 / tr.fps, nt));
-  if (ready() && !exact) { vid.currentTime = t; $("stage").classList.remove("still"); }
-  else showStill();
+  if (ready() && !exact && !fast) { vid.currentTime = t; $("stage").classList.remove("still"); }
+  else showStill(fast);
   draw();
 }
 function toggle() {
@@ -76,12 +86,14 @@ function follow() {
 const thumbs = new Map();
 function thumb(tr, c) {
   const k = `${tr.name}|${state.version}|${c.n}`;
+  if (thumbsLocal) { for (const [kk, im] of thumbs) if (kk.startsWith(`${tr.name}|${state.version}|`) && im.dataset.text === c.text && im.complete && im.naturalWidth) return im; return null; }
   let im = thumbs.get(k);
   if (!im) {
     if (thumbs.size > 200) thumbs.clear();
     im = new Image();
     im.onload = () => draw();
-    im.src = `/api/frame?name=${encodeURIComponent(tr.name)}&t=${(c.start + Math.min(c.dur * 0.5, 1)).toFixed(3)}&w=192&v=${state.version}`;
+    im.dataset.text = c.text;
+    im.src = `/api/frame?name=${encodeURIComponent(tr.name)}&t=${(c.start + c.dur * 0.5).toFixed(3)}&w=192&v=${state.version}`;
     thumbs.set(k, im);
   }
   return im.complete && im.naturalWidth ? im : null;
@@ -217,7 +229,7 @@ cv.addEventListener("pointerdown", (e) => {
     if (e.pointerType !== "mouse") press = setTimeout(() => { const d = drag; drag = undefined; draw(); if (d) openMenu(d.c, e.clientX, e.clientY); }, 520);
     draw();
   } else if (h) { selN = h.c.n; seek(h.c.start + Math.min(0.5, h.c.dur / 2), true); renderClips(); }
-  else { const s = tOf(e.offsetX); drag = { kind: e.shiftKey ? "note" : "scrub", t0: s }; seek(s); }
+  else { const s = tOf(e.offsetX); drag = { kind: e.shiftKey ? "note" : "scrub", t0: s }; seek(s, true, true); }
 });
 cv.addEventListener("pointermove", (e) => {
   if (pointers.has(e.pointerId)) pointers.set(e.pointerId, e.offsetX);
@@ -233,8 +245,8 @@ cv.addEventListener("pointermove", (e) => {
     return;
   }
   const s = tOf(e.offsetX);
-  if (drag.kind === "scrub") seek(s);
-  else if (drag.kind === "note") { drag.t1 = s; seek(s); }
+  if (drag.kind === "scrub") seek(s, true, true);
+  else if (drag.kind === "note") { drag.t1 = s; seek(s, true, true); }
   else if (drag.kind === "trim") {
     clearTimeout(press);
     const c = drag.c, fps = cur().fps, sn = snap(s, c.n);
@@ -263,6 +275,7 @@ function endPointer(e, cancel) {
   if (pinch) { if (pointers.size < 2) pinch = undefined; return; }
   clearTimeout(press);
   const d = drag; drag = undefined;
+  if (d && (d.kind === "scrub" || d.kind === "note")) seek(t, true);
   if (!d || cancel) return draw();
   if (d.kind === "note" && d.t1 !== undefined && Math.abs(d.t1 - d.t0) > 0.05) addNote(Math.min(d.t0, d.t1), Math.max(d.t0, d.t1));
   else if (d.kind === "trim") {
@@ -408,15 +421,15 @@ function renderList() {
 function showTab(name) {
   for (const b of document.querySelectorAll("#tabs button")) b.classList.toggle("on", b.dataset.tab === name);
   for (const p of document.querySelectorAll(".panel")) p.classList.toggle("on", p.id === "p-" + name);
-  if (name === "media" || name === "music") loadMedia();
+  if (name === "music") loadMedia();
 }
 for (const b of document.querySelectorAll("#tabs button")) b.onclick = () => showTab(b.dataset.tab);
 // Desktop shows the media bin on the left; narrower layouts keep it as a tab.
 const wide = () => matchMedia("(min-width: 1100px)").matches;
 function placeMedia() {
-  const box = $("mediabox"), want = wide() ? $("bin") : $("p-media");
+  const box = $("addbox"), want = wide() ? $("bin") : $("addsheet");
   if (box.parentElement !== want) want.appendChild(box);
-  if (wide() && $("p-media").classList.contains("on")) showTab("clips");
+  if (wide()) $("addsheet").classList.remove("open");
 }
 // Bottom sheet (phone/tablet portrait): swipe the handle up to open, down to close.
 const openSheet = () => { if (!wide()) document.body.classList.add("sheet"); };
@@ -456,9 +469,38 @@ async function post(path, body) {
   if (!r.ok) toast(`${path === "/api/edit" ? "edit" : path.slice(5)} failed: ${j.error ?? r.status}`, { bad: true });
   return r.ok ? j : null;
 }
+// Optimistic: reshape the strip at once; the server's rebuild replaces it when it lands.
+let pending = 0, snapshot;
+function local(body) {
+  const tr = cur(); if (!tr) return;
+  const cs = tr.clips.map((c) => ({ ...c })), i = body.n - 1, c = cs[i];
+  if (body.op === "move" && c) { cs.splice(i, 1); cs.splice(Math.max(0, Math.min(cs.length, body.to - 1)), 0, c); }
+  else if (body.op === "delete" && c) cs.splice(i, 1);
+  else if (body.op === "duplicate" && c) cs.splice(i + 1, 0, { ...c });
+  else if (body.op === "split" && c) { const a = { ...c, dur: body.at }, b = { ...c, dur: c.dur - body.at, in: "cut", inDur: 0, from: c.from != null ? c.from + body.at * (c.speed ?? 1) : c.from }; cs.splice(i, 1, a, b); }
+  else if ((body.op === "trim" || body.op === "title") && c) { if (body.dur) c.dur = body.dur; if (body.from != null) c.from = body.from; if (body.text) c.text = `title "${body.text}"`; }
+  else if (body.op === "insert") cs.splice(Math.max(0, Math.min(cs.length, body.at - 1)), 0, { kind: "shot", text: `shot ${body.file}`, dur: body.dur, in: "cut", inDur: 0, start: 0 });
+  else return;
+  let s = 0; cs.forEach((x, k) => { x.n = k + 1; x.start = s; s += x.dur; });
+  snapshot ??= JSON.stringify(state);
+  tr.clips = cs; tr.dur = s; tr.local = true;
+  thumbsLocal = true;
+  renderClips(); draw();
+}
+let thumbsLocal = false;
+function chip() {
+  const tr = cur(), p = tr?.proxy, el = $("rchip");
+  const txt = pending ? "saving edit…" : p?.state === "rendering" ? `rendering ${Math.round(p.progress * 100)}%` : p?.state === "waiting" ? "rendering…" : "";
+  el.textContent = txt; el.classList.toggle("on", !!txt);
+}
 async function edit(body, msg) {
   if (!canEdit()) return;
-  if (await post("/api/edit", body)) {
+  pending++; local(body); chip();
+  const ok = await post("/api/edit", body);
+  pending--;
+  if (!ok && snapshot) { state = JSON.parse(snapshot); snapshot = undefined; update(); }
+  chip();
+  if (ok) {
     if (body.op === "move") selN = body.to; else if (body.op === "duplicate" || body.op === "split") selN = body.n + 1;
     toast(msg ?? opText(body), { undo: true });
   }
@@ -496,48 +538,140 @@ function renderClips() {
       const row = document.createElement("li");
       row.className = "trim";
       const shot = c.kind === "shot";
-      row.innerHTML = (shot ? `<label title="Where in the source media this clip starts">start in source <input type="number" inputmode="decimal" step="0.1" min="0" value="${(c.from ?? 0).toFixed(2)}">s</label>` : "") +
-        `<label title="How long the clip plays">length <input type="number" inputmode="decimal" step="0.1" min="0.1" value="${c.dur.toFixed(2)}">s</label><button class="primary" title="Save this trim">apply</button>`;
-      const ins = row.querySelectorAll("input");
-      row.querySelector("button").onclick = () => {
-        const body = { op: "trim", n: c.n, dur: Number(ins[ins.length - 1].value) };
-        if (shot) body.from = Number(ins[0].value);
+      const strip = shot && c.srcDur > 0;
+      row.innerHTML = (strip ? `<div style="width:100%"><div class="strip" id="strip" title="Source filmstrip: drag the amber handles to set the in and out points, or drag the lit part to slide the clip through its source"></div><div class="striplbl"><span>0s</span><span id="striptxt"></span><span>${c.srcDur.toFixed(1)}s</span></div></div>` : "") +
+        (shot ? `<label title="Where in the source media this clip starts">start ${stepper("tr-from", c.from ?? 0, 0.1, 0, "start in source")}</label>` : "") +
+        `<label title="How long the clip plays">length ${stepper("tr-dur", c.dur, 0.1, 1 / (tr.fps || 30), "clip length")}</label><button class="primary" title="Save this trim">apply</button>`;
+      row.querySelector("button.primary").onclick = () => {
+        const body = { op: "trim", n: c.n, dur: Number($("tr-dur").value) };
+        if (shot) body.from = Number($("tr-from").value);
         trimOpen = 0;
         edit(body);
       };
+      wireSteppers(row);
+      if (strip) setTimeout(() => filmstrip(c), 0);
       ul.appendChild(row);
     }
   }
 }
 
-// ---------------------------------------------------------------- media bin: add a clip
+// ---------------------------------------------------------------- −/+ steppers (instead of spinners)
+function stepper(id, v, step, min, what) {
+  return `<span class="step"><button type="button" data-step="-${step}" data-for="${id}" title="Decrease the ${what} by ${step}s">−</button>` +
+    `<input type="text" inputmode="decimal" id="${id}" value="${Number(v).toFixed(2)}" data-min="${min}" title="The ${what} in seconds"><button type="button" data-step="${step}" data-for="${id}" title="Increase the ${what} by ${step}s">+</button></span>`;
+}
+function wireSteppers(root) {
+  for (const b of root.querySelectorAll("button[data-step]")) b.onclick = () => {
+    const inp = $(b.dataset.for), min = Number(inp.dataset.min || 0);
+    inp.value = Math.max(min, (Number(inp.value) || 0) + Number(b.dataset.step)).toFixed(2);
+    inp.dispatchEvent(new Event("input"));
+  };
+}
+// ---------------------------------------------------------------- trim filmstrip
+function filmstrip(c) {
+  const el = $("strip"); if (!el) return;
+  const W = el.clientWidth, n = Math.max(4, Math.round(W / 80)), D = c.srcDur, sp = c.speed ?? 1, fps = cur().fps || 30;
+  const frames = [];
+  for (let k = 0; k < n; k++) frames.push(`<img alt="" draggable="false" src="/api/srcframe?name=${encodeURIComponent(sel)}&n=${c.n}&t=${((k + 0.5) * D / n).toFixed(2)}&w=160" style="left:${(k / n) * 100}%;width:${100 / n + 0.2}%">`);
+  el.innerHTML = frames.join("") + `<div class="selr"></div><div class="hdl" data-h="in" title="In point: drag to change where the clip starts in its source"></div><div class="hdl" data-h="out" title="Out point: drag to change where the clip ends"></div>`;
+  const selr = el.querySelector(".selr"), [hin, hout] = el.querySelectorAll(".hdl");
+  let from = Number($("tr-from").value), len = Number($("tr-dur").value) * sp;
+  const px = (s) => (s / D) * W;
+  const paint = () => {
+    selr.style.left = px(from) + "px"; selr.style.width = Math.max(2, px(len)) + "px";
+    hin.style.left = px(from) + "px"; hout.style.left = px(from + len) + "px";
+    $("striptxt").textContent = `${from.toFixed(2)}–${(from + len).toFixed(2)}s`;
+  };
+  const sync = () => { $("tr-from").value = from.toFixed(2); $("tr-dur").value = (len / sp).toFixed(2); paint(); };
+  $("tr-from").oninput = () => { from = Math.max(0, Math.min(D - 1 / fps, Number($("tr-from").value) || 0)); paint(); };
+  $("tr-dur").oninput = () => { len = Math.max(1 / fps, (Number($("tr-dur").value) || 0) * sp); paint(); };
+  let dr;
+  el.onpointerdown = (e) => {
+    const h = e.target.closest(".hdl")?.dataset.h ?? (e.target.closest(".selr") ? "move" : null);
+    if (!h) return;
+    dr = { h, x0: e.clientX, from, len }; el.setPointerCapture(e.pointerId); e.preventDefault();
+  };
+  el.onpointermove = (e) => {
+    if (!dr) return;
+    const ds = ((e.clientX - dr.x0) / W) * D, min = 1 / fps;
+    if (dr.h === "in") { const end = dr.from + dr.len; from = Math.max(0, Math.min(end - min, dr.from + ds)); len = end - from; }
+    else if (dr.h === "out") len = Math.max(min, Math.min(D - dr.from, dr.len + ds));
+    else from = Math.max(0, Math.min(D - dr.len, dr.from + ds));
+    sync();
+  };
+  el.onpointerup = el.onpointercancel = () => { dr = undefined; };
+  paint();
+}
+
+// ---------------------------------------------------------------- add-clip picker: search, folders, preview
+let mediaFiles = [], addFolder = "all", addPick;
 let mediaLoaded = false;
 async function loadMedia(force) {
-  if (mediaLoaded && !force) return renderMediaHint();
+  if (mediaLoaded && !force) return renderPicker();
   mediaLoaded = true;
   const files = await (await fetch("/api/media")).json().catch(() => []);
+  audioFiles = files.filter((f) => f.audio);
+  mediaFiles = files.filter((f) => !f.audio);
+  renderMusic();
+  renderPicker();
+}
+function renderPicker() {
+  const dirs = ["all", ...new Set(mediaFiles.map((f) => f.dir))];
+  $("addfolders").innerHTML = dirs.length > 2 ? dirs.map((d) => `<button data-d="${esc(d)}" class="${d === addFolder ? "on" : ""}" title="${d === "all" ? "Show files from every media folder" : "Show only files in " + esc(d)}">${esc(d)}</button>`).join("") : "";
+  for (const b of $("addfolders").querySelectorAll("button")) b.onclick = () => { addFolder = b.dataset.d; renderPicker(); };
+  const q = $("addq").value.trim().toLowerCase();
+  const list = mediaFiles.filter((f) => (addFolder === "all" || f.dir === addFolder) && (!q || f.name.toLowerCase().includes(q)));
   const pk = $("picker");
   pk.innerHTML = "";
-  audioFiles = files.filter((f) => f.audio);
-  renderMusic();
-  for (const f of files.filter((f) => !f.audio)) {
+  for (const f of list) {
     const fig = document.createElement("figure");
-    fig.title = `Add ${f.name} as a 3 s shot after the clip under the playhead`;
+    fig.title = `Preview ${f.name}, then insert it as a 3 s shot`;
+    if (addPick && addPick.name === f.name && addPick.dir === f.dir) fig.className = "on";
     fig.innerHTML = `<img loading="lazy" alt="" src="/api/thumb?d=${encodeURIComponent(f.dir)}&f=${encodeURIComponent(f.name)}"><figcaption>${esc(f.dir)}/${esc(f.name)}</figcaption>`;
-    fig.onclick = () => {
-      if (!canEdit()) return;
-      const now = clipAtT(cur(), t), at = now ? now.n + 1 : 1;
-      edit({ op: "insert", at, file: f.name, dir: f.dir, dur: 3 });
-    };
+    fig.onclick = () => { addPick = f; renderPicker(); preview(); };
     pk.appendChild(fig);
   }
-  $("pickhint").dataset.n = files.filter((f) => !f.audio).length;
-  renderMediaHint();
+  if (!addPick) $("pickhint").textContent = !state?.editable ? "Read only: serve the .otio file to add clips." : list.length ? "Tap a file to preview it, then insert." : mediaFiles.length ? "No file matches the search." : "No media files found next to the edit.";
 }
-function renderMediaHint() {
-  const n = Number($("pickhint").dataset.n || 0), now = clipAtT(cur(), t);
-  $("pickhint").textContent = !state?.editable ? "Read only: serve the .otio file to add clips." : n ? `tap a file to add a 3 s shot after clip ${now?.n ?? "start"}` : "no media files found next to the edit";
+$("addq").oninput = () => renderPicker();
+function preview() {
+  const f = addPick, box = $("addprev"); if (!f) return;
+  const now = clipAtT(cur(), t), at = now ? now.n + 1 : 1;
+  const src = `/api/mediafile?d=${encodeURIComponent(f.dir)}&f=${encodeURIComponent(f.name)}`;
+  const still = /\.(png|jpe?g|gif)$/i.test(f.name);
+  box.innerHTML = (still ? `<img alt="" src="${src}">` : `<video muted playsinline autoplay preload="auto" src="${src}"></video>`) +
+    `<div class="rowf"><span class="hint" style="flex:1">${esc(f.dir)}/${esc(f.name)}</span><button class="primary" id="addgo" title="Insert this file as a 3 s shot after clip ${at - 1 || "start"}" ${canEdit() ? "" : "disabled"}>insert after clip ${at - 1 || "start"}</button></div>`;
+  const v = box.querySelector("video");
+  if (v) {
+    // play a few seconds from 40% in, on a loop
+    let a = 0;
+    v.onloadedmetadata = () => { a = (v.duration || 0) * 0.4; v.currentTime = a; v.play().catch(() => {}); };
+    v.ontimeupdate = () => { if (v.currentTime > a + 3) v.currentTime = a; };
+  }
+  $("addgo").onclick = () => { edit({ op: "insert", at, file: f.name, dir: f.dir, dur: 3 }); closeAdd(); };
 }
+function closeAdd() { $("addsheet").classList.remove("open"); const v = $("addprev").querySelector("video"); if (v) v.pause(); if (!wide()) { addPick = undefined; $("addprev").innerHTML = `<div class="hint" id="pickhint"></div>`; } }
+$("addclose").onclick = closeAdd;
+$("addsheet").addEventListener("pointerdown", (e) => { if (e.target === $("addsheet")) closeAdd(); });
+$("addbtn").onclick = () => { loadMedia(); if (wide()) $("addq").focus(); else $("addsheet").classList.add("open"); };
+function renderMediaHint() { if (!addPick) renderPicker(); }
+
+// ---------------------------------------------------------------- render full (opt-in, one at a time)
+function renderFull() {
+  const f = state?.full, el = $("fullinfo"), b = $("renderfull");
+  const busy = f && (f.state === "rendering" || f.state === "publishing");
+  b.disabled = !!busy || !cur() || !!cur().error;
+  if (!f) { el.textContent = ""; return; }
+  if (f.state === "rendering") el.textContent = `full render ${Math.round(f.progress * 100)}%`;
+  else if (f.state === "publishing") el.textContent = "publishing…";
+  else if (f.state === "failed") el.innerHTML = `<span style="color:var(--bad)">full render failed: ${esc(f.error ?? "")}</span>`;
+  else el.innerHTML = `${esc(f.note ?? "done")}${f.url ? ` <a href="${esc(f.url)}" target="_blank" rel="noopener" title="Open the rendered MP4 in the Screens gallery">gallery</a>` : ""}${f.video ? ` <a href="${esc(f.video)}" target="_blank" rel="noopener" title="Play the published full-resolution MP4">video</a>` : ""}${f.file ? ` <a href="/api/full?f=${encodeURIComponent(f.file)}" title="Download the full-resolution MP4">download</a>` : ""}`;
+}
+$("renderfull").onclick = async () => {
+  if (!cur()) return;
+  const r = await fetch(`/api/render?name=${encodeURIComponent(sel)}`, { method: "POST" });
+  if (!r.ok) { const j = await r.json().catch(() => ({})); toast(`render failed: ${j.error ?? r.status}`, { bad: true }); }
+};
 
 // ---------------------------------------------------------------- inspector: title, transition, badge
 const TRANS = [["cut", "Hard cut, no blend"], ["fade", "Cross-fade from the previous clip"], ["dip", "Dip through a colour (black) between clips"], ["flash", "A white flash on the cut"], ["wipe", "Wipe across from the previous clip"], ["slide", "The new clip slides in from a side"], ["zoom", "Zoom through into the new clip"]];
@@ -557,11 +691,11 @@ function renderInspector() {
   if (c.kind === "title") h += `<div class="sec"><h3>title</h3>
     <label class="fld" title="The big title text">text<input type="text" id="it-text" value="${esc(c.title ?? "")}" ${ro}></label>
     <label class="fld" title="Smaller line under the title; leave empty for none">sub line<input type="text" id="it-sub" value="${esc(c.sub ?? "")}" placeholder="(none)" ${ro}></label>
-    <div class="rowf"><label class="fld" title="How long the title stays on screen">length (s)<input type="number" id="it-dur" step="0.1" min="0.1" value="${c.dur.toFixed(2)}" ${ro}></label>
+    <div class="rowf"><label class="fld" title="How long the title stays on screen">length (s)${stepper("it-dur", c.dur, 0.1, 0.1, "title length")}</label>
     <button class="primary" id="it-apply" title="Save the title text, sub line and length" ${ro}>apply title</button></div></div>`;
   h += `<div class="sec"><h3>transition in</h3><div class="seg" id="it-trans">` +
     TRANS.map(([k, tip]) => `<button data-t="${k}" class="${k === ty ? "on" : ""}" title="${tip}${c.n === 1 && !FIRST_OK.includes(k) ? " (not on the first clip)" : ""}" ${ro || (c.n === 1 && !FIRST_OK.includes(k)) ? "disabled" : ""}>${k}</button>`).join("") + `</div>
-    <div class="rowf"><label class="fld" title="Transition length in seconds">duration (s)<input type="number" id="it-tdur" step="0.05" min="0.01" max="10" value="${(ty === c.in ? c.inDur : TDEF[ty]).toFixed(2)}" ${ro || ty === "cut" ? "disabled" : ""}></label>
+    <div class="rowf">${ty === "cut" ? "" : `<label class="fld" title="Transition length in seconds">duration (s)${stepper("it-tdur", ty === c.in ? c.inDur : TDEF[ty], 0.05, 0.01, "transition length")}</label>`}
     <label class="fld" title="Side the new clip slides in from" style="${ty === "slide" ? "" : "display:none"}">from<select id="it-dir" ${ro}>${["left", "right", "up", "down"].map((d) => `<option ${d === (c.inDir ?? "left") ? "selected" : ""}>${d}</option>`).join("")}</select></label>
     <button class="primary" id="it-tapply" title="Save the transition into this clip" ${ro}>apply transition</button></div></div>`;
   h += `<div class="sec"><h3>speed badge</h3><div class="seg" id="it-badge">` +
@@ -569,6 +703,7 @@ function renderInspector() {
       .map(([v, l, tip]) => `<button data-b="${v}" class="${(c.badge ?? "") === v ? "on" : ""}" title="${tip}" ${ro}>${l}</button>`).join("") + `</div>
     <div class="hint">A grey plate with white text, drawn over the clip in the render.</div></div>`;
   box.innerHTML = h;
+  wireSteppers(box);
   if (c.kind === "title") $("it-apply").onclick = () => {
     const body = { op: "title", n: c.n, dur: Number($("it-dur").value) };
     if ($("it-text").value !== c.title) body.text = $("it-text").value;
@@ -637,6 +772,7 @@ function update() {
     vid.onloadeddata = () => { vid.currentTime = t; $("stage").classList.remove("still"); };
   } else if (p.state !== "ready") { vid.pause(); showStill(); }
   if (t > tr.dur) t = Math.max(0, tr.dur - 1 / tr.fps);
+  chip(); renderFull();
   clampView();
   renderNotes();
   renderMediaHint();
@@ -648,7 +784,7 @@ loadMedia();
 const es = new EventSource("/events");
 es.addEventListener("build", (e) => {
   const prev = state?.version;
-  state = JSON.parse(e.data);
+  state = JSON.parse(e.data); snapshot = undefined; thumbsLocal = false;
   $("file").textContent = `${state.file}  v${state.version}  ${state.ms}ms`;
   const bad = state.error ? 1 : state.trailers.filter((x) => x.error).length;
   $("status").textContent = bad ? `${bad} error${bad > 1 ? "s" : ""}` : "ok";

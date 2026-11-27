@@ -4,6 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>reel live</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#161616">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="reel">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23222'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%23ffb454' stroke-width='3'/%3E%3Ccircle cx='16' cy='16' r='2.5' fill='%23ffb454'/%3E%3C/svg%3E">
 <style>
   /* Neutral greys only (zero saturation). Amber is only the playhead, the selection and the primary
@@ -82,6 +89,30 @@
   .tracks { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
   .tracks button { text-align: left; font-weight: 500; }
   .tracks button.on { border-color: var(--accent); color: var(--accent); }
+  #rchip { position: absolute; top: 10px; left: 10px; display: none; padding: 4px 10px; border-radius: 99px; background: #000000b3; border: 1px solid #4a4a4a; color: #e6e6e6; font: 600 12px var(--mono); }
+  #rchip.on { display: block; }
+  #fullinfo a { color: var(--text); text-decoration: underline; margin-left: 6px; }
+  .step { display: inline-flex; align-items: stretch; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+  .step button { border: 0; border-radius: 0; min-width: 40px; background: var(--panel2); font-size: 16px; }
+  .step input { width: 64px; min-height: 40px; border: 0; border-left: 1px solid var(--line); border-right: 1px solid var(--line); background: var(--bg); color: var(--text); font: 14px var(--mono); text-align: center; }
+  .strip { position: relative; height: 56px; width: 100%; background: #000; border-radius: 6px; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; margin: 4px 0 8px; }
+  .strip img { position: absolute; top: 0; height: 100%; object-fit: cover; opacity: .45; }
+  .strip .selr { position: absolute; top: 0; bottom: 0; border-top: 2px solid var(--accent); border-bottom: 2px solid var(--accent); cursor: grab; }
+  .strip .selr img { opacity: 1; }
+  .strip .hdl { position: absolute; top: 0; bottom: 0; width: 40px; margin-left: -20px; cursor: ew-resize; display: flex; justify-content: center; }
+  .strip .hdl::after { content: ""; width: 8px; height: 100%; background: var(--accent); border-radius: 3px; }
+  .striplbl { display: flex; justify-content: space-between; font: 11px var(--mono); color: var(--dim); }
+  #addsheet { display: none; position: fixed; inset: 0; z-index: 25; background: #000a; }
+  #addsheet.open { display: block; }
+  #addsheet #addbox { position: absolute; left: 0; right: 0; bottom: 0; max-height: 82dvh; overflow: auto; background: var(--panel); border-top: 1px solid var(--line); border-radius: 14px 14px 0 0; padding: 12px; box-shadow: 0 -10px 30px #000c; }
+  #bin #addclose { display: none; }
+  .addhead { display: flex; align-items: center; gap: 8px; }
+  .addhead h3 { margin: 0; }
+  #addq { width: 100%; min-height: 40px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: 14px var(--mono); padding: 4px 10px; margin: 8px 0; }
+  #addprev { margin-bottom: 8px; }
+  #addprev video, #addprev img { width: 100%; aspect-ratio: 16 / 9; object-fit: contain; background: #000; border-radius: 6px; display: block; }
+  #addprev .rowf { margin-top: 6px; }
+  #picker figure.on { border-color: var(--accent); }
   #report { font: 11.5px/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dim); }
   /* Long-press / right-click menu on a timeline clip. */
   #menu { display: none; position: fixed; z-index: 20; min-width: 200px; background: #262626; border: 1px solid #4a4a4a; border-radius: 9px; padding: 5px; box-shadow: 0 10px 30px #000a; }
@@ -115,7 +146,7 @@
     #stagewrap { padding: 6px; } #tl { height: 110px; } #clip { display: none; }
     .keys { display: none; }
   }
-  @media (min-width: 1100px) { .tab-media { display: none; } }
+
 </style>
 </head>
 <body>
@@ -130,7 +161,7 @@
 <aside id="bin"></aside>
 <section id="stagewrap">
   <div id="err"></div>
-  <div id="stage" class="still" title="Preview: the proxy video plays with sound; exact composed stills show while it renders or when stepping"><video id="vid" preload="auto" playsinline></video><img id="still" alt=""></div>
+  <div id="stage" class="still" title="Preview: the proxy video plays with sound; exact composed stills show while it renders or when stepping"><video id="vid" preload="auto" playsinline></video><img id="still" alt=""><div id="rchip" title="Background work on the preview: your edit is saving, or the preview video is re-rendering"></div></div>
 </section>
 <section id="tlwrap">
   <div id="bar">
@@ -138,8 +169,11 @@
     <span id="time" title="Playhead time and frame">0.00s</span>
     <button id="undo" title="Undo the last edit (Ctrl/Cmd-Z)">↶</button>
     <button id="redo" title="Redo the edit you just undid (Shift-Ctrl/Cmd-Z)">↷</button>
+    <button id="addbtn" title="Add a clip from the media folders: search, preview, then insert">＋ add</button>
     <button id="zoomout" title="Zoom the timeline out (Ctrl-wheel or pinch also zoom)">−</button>
     <button id="zoomin" title="Zoom the timeline in (Ctrl-wheel or pinch also zoom)">＋</button>
+    <button id="renderfull" title="Render the full-resolution MP4 on the server (one at a time) and publish it to the gallery">render full</button>
+    <span id="fullinfo" class="hint"></span>
     <span class="grow"></span>
     <span class="hint keys">J/K/L shuttle · I/O trim · Del · Alt-↑↓ move · drag clips to reorder, edges to trim · right-click for more</span>
   </div>
@@ -152,7 +186,6 @@
     <button data-tab="clips" class="on" title="Clip list: trim, move, delete with buttons">clips</button>
     <button data-tab="clip" title="Inspector for the selected clip: title text, transition in, speed badge">clip</button>
     <button data-tab="music" title="Music track and volume for the whole trailer">music</button>
-    <button data-tab="media" class="tab-media" title="Media files you can add as new shots">media</button>
     <button data-tab="notes" title="Notes for Claude: mark moments and send feedback">notes</button>
     <button data-tab="report" title="Build report: timing, beats and warnings">report</button>
   </div>
@@ -164,13 +197,6 @@
     </div>
     <div class="panel" id="p-clip"><div id="insp"></div></div>
     <div class="panel" id="p-music"><div id="musicbox"></div></div>
-    <div class="panel" id="p-media">
-      <div id="mediabox">
-        <h3>media</h3>
-        <div class="hint" id="pickhint"></div>
-        <div id="picker"></div>
-      </div>
-    </div>
     <div class="panel" id="p-notes">
       <h3>notes for Claude</h3>
       <ul id="items"></ul>
@@ -182,6 +208,15 @@
   </div>
 </aside>
 <div id="menu" role="menu"></div>
+<div id="addsheet">
+  <div id="addbox">
+    <div class="addhead"><h3>add a clip</h3><span class="grow"></span><button id="addclose" title="Close the add-clip picker">✕</button></div>
+    <input type="text" id="addq" placeholder="search media" title="Filter the media files by name" autocomplete="off">
+    <div class="seg" id="addfolders"></div>
+    <div id="addprev"><div class="hint" id="pickhint">Tap a file to preview it.</div></div>
+    <div id="picker"></div>
+  </div>
+</div>
 <div id="toast" role="status"><span class="msg" id="toastmsg"></span><button id="toastundo" class="primary" title="Undo this edit">undo</button><button id="toastredo" title="Redo the edit you undid">redo</button><button id="toastx" title="Dismiss">✕</button></div>
 <script src="/app.js"></script>
 </body>
