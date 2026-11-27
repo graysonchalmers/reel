@@ -1,7 +1,8 @@
 // Live viewer server: watch the trailer file, rebuild timelines and reports on save, render a
 // half-size proxy MP4 in the background, push state over SSE, serve frames, proxies and feedback.
 import { createReadStream, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { Resvg } from "@resvg/resvg-js";
 import { createServer, type ServerResponse } from "node:http";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,22 +14,34 @@ import { png } from "../core/png.ts";
 import type { Project, Timeline } from "../core/project.ts";
 import { FeedbackError, writeFeedback } from "./feedback.ts";
 import { loadProject } from "./load.ts";
-import { FrameSource, inspect } from "./media.ts";
+import { FrameSource, inspect, probe } from "./media.ts";
 import { renderMp4 } from "./render.ts";
 import { clipText, report } from "./report.ts";
 
 export interface ServeOptions {
-  host?: string; media?: string[]; port?: number; out?: string; log?: (line: string) => void }
+  host?: string; media?: string[]; port?: number; out?: string; log?: (line: string) => void
+  /** Shell command run after a full render to publish it; `{file}` is replaced by the quoted MP4 path.
+   *  A `GALLERY: <url>` line (else the first URL) becomes the link in
+   *  the viewer, and a `VIDEO: <url>` line a direct link to the published MP4. Default: env REEL_PUBLISH. */
+  publish?: string }
+
+/** The app icon: a grey plate with an amber reel. */
+const ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#222222"/><circle cx="256" cy="256" r="150" fill="none" stroke="#ffb454" stroke-width="40"/><circle cx="256" cy="256" r="40" fill="#ffb454"/><g fill="#ffb454"><circle cx="256" cy="166" r="28"/><circle cx="256" cy="346" r="28"/><circle cx="166" cy="256" r="28"/><circle cx="346" cy="256" r="28"/></g></svg>`;
+const iconPng = new Map<number, Buffer>();
+const iconAt = (px: number) => { let b = iconPng.get(px); if (!b) { b = Buffer.from(new Resvg(ICON_SVG, { fitTo: { mode: "width", value: px } }).render().asPng()); iconPng.set(px, b); } return b; };
+const MANIFEST = { name: "reel live", short_name: "reel", start_url: "/", scope: "/", display: "fullscreen", orientation: "any", background_color: "#161616", theme_color: "#161616",
+  icons: [{ src: "/icon.png?s=192", sizes: "192x192", type: "image/png" }, { src: "/icon.png?s=512", sizes: "512x512", type: "image/png" }, { src: "/icon.svg", sizes: "any", type: "image/svg+xml" }] };
+interface FullRender { name: string; state: "rendering" | "publishing" | "done" | "failed"; progress: number; file?: string; url?: string; video?: string; note?: string; error?: string }
 
 interface ErrInfo { message: string; loc?: string }
 interface Proxy { state: "waiting" | "rendering" | "ready" | "failed"; progress: number; version: number; error?: string }
 interface TrailerInfo {
   name: string; w: number; h: number; fps: number; dur: number; bpm?: number; beat0: number;
-  clips: { n: number; start: number; dur: number; kind: string; text: string; loc?: string; in: string; inDur: number; inDir?: string; from?: number; title?: string; sub?: string; badge?: string }[];
+  clips: { srcDur?: number; speed?: number; n: number; start: number; dur: number; kind: string; text: string; loc?: string; in: string; inDur: number; inDir?: string; from?: number; title?: string; sub?: string; badge?: string }[];
   musicSrc?: string; musicVol?: number;
   report: string; music?: { hop: number; db: number[]; hits: number[] }; proxy: Proxy; error?: ErrInfo;
 }
-interface State { version: number; file: string; editable: boolean; undo: number; redo: number; time: string; ms: number; error?: ErrInfo; trailers: TrailerInfo[] }
+interface State { full?: FullRender; version: number; file: string; editable: boolean; undo: number; redo: number; time: string; ms: number; error?: ErrInfo; trailers: TrailerInfo[] }
 
 const viewerDir = join(dirname(fileURLToPath(import.meta.url)), "..", "viewer");
 const errInfo = (e: ReelError): ErrInfo => ({ message: e.message, loc: e.loc });
@@ -66,6 +79,56 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
   let timer: NodeJS.Timeout | undefined;
   let abort: AbortController | undefined;
   const frameSources = new Map<string, FrameSource>();
+  const srcDur = (p: string) => { try { return probe(p).dur; } catch { return undefined; } };
+  const sendFile = (req: { headers: { range?: string } }, res: ServerResponse, path: string, type: string) => {
+    const size = statSync(path).size, m = /bytes=(\d*)-(\d*)/.exec(req.headers.range ?? "");
+    if (m) {
+      const a = m[1] ? Number(m[1]) : size - Number(m[2]), z = m[1] && m[2] ? Math.min(size - 1, Number(m[2])) : size - 1;
+      res.writeHead(206, { "content-type": type, "accept-ranges": "bytes", "content-range": `bytes ${a}-${z}/${size}`, "content-length": z - a + 1, "cache-control": "no-store" });
+      createReadStream(path, { start: a, end: z }).pipe(res);
+    } else {
+      res.writeHead(200, { "content-type": type, "accept-ranges": "bytes", "content-length": size, "cache-control": "no-store" });
+      createReadStream(path).pipe(res);
+    }
+  };
+  const TYPES: Record<string, string> = { mp4: "video/mp4", mov: "video/quicktime", webm: "video/webm", mkv: "video/x-matroska", gif: "image/gif", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", wav: "audio/wav", mp3: "audio/mpeg", ogg: "audio/ogg", m4a: "audio/mp4", flac: "audio/flac" };
+  const typeOf = (n: string) => TYPES[n.replace(/^.*\./, "").toLowerCase()] ?? "application/octet-stream";
+  const publishCmd = opts.publish ?? process.env.REEL_PUBLISH ?? "";
+  /** One full-resolution render at a time, then the optional publish step. */
+  const renderFull = async (name: string) => {
+    const tl = timelines.get(name);
+    if (!tl) throw new Error(`no trailer '${name}'`);
+    const stampName = `${basename(name)}-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.mp4`;
+    const file = join(out, "_full", stampName), tmp = file.replace(/\.mp4$/, ".part.mp4");
+    const full: FullRender = { name, state: "rendering", progress: 0 };
+    state.full = full; push();
+    let last = 0;
+    try {
+      await renderMp4(tl, tmp, { onProgress: (f, n) => { full.progress = f / n; if (performance.now() - last > 500) { last = performance.now(); push(); } } });
+      renameSync(tmp, file);
+      full.file = stampName; full.progress = 1;
+      log(`[reel] full render -> ${file}`);
+      if (publishCmd) {
+        full.state = "publishing"; push();
+        const q = `'${file.replace(/'/g, "'\\''")}'`;
+        const outText = await new Promise<string>((ok, fail) => {
+          const p = spawn("sh", ["-c", publishCmd.replaceAll("{file}", q)], { stdio: ["ignore", "pipe", "pipe"] });
+          let o = ""; p.stdout.on("data", (d) => (o += d)); p.stderr.on("data", (d) => (o += d));
+          const kill = setTimeout(() => p.kill(), 120000);
+          p.on("close", (code) => { clearTimeout(kill); code === 0 ? ok(o) : fail(new Error(`publish failed (${code}): ${o.trim().slice(-300)}`)); });
+        });
+        full.url = /GALLERY:\s*(https?:\/\/\S+)/.exec(outText)?.[1] ?? /https?:\/\/\S+/.exec(outText)?.[0];
+        full.video = /VIDEO:\s*(https?:\/\/\S+)/.exec(outText)?.[1];
+        full.note = full.url ? "published to the gallery" : "published";
+      } else full.note = "saved on the server (no publish step set): download it below";
+      full.state = "done";
+    } catch (e) {
+      try { rmSync(tmp, { force: true }); } catch {}
+      full.state = "failed"; full.error = wrap(e).message;
+      log(`[reel] full render failed: ${full.error}`);
+    }
+    push();
+  };
 
   const push = () => {
     const msg = `event: build\ndata: ${JSON.stringify(state)}\n\n`;
@@ -79,7 +142,7 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
       if (!tl || signal.aborted) continue;
       t.proxy = { state: "rendering", progress: 0, version };
       push();
-      const final = join(out, "_proxy", t.name + ".mp4"), tmp = final.replace(/\.mp4$/, ".part.mp4");
+      const final = join(out, "_proxy", t.name + ".mp4"), tmp = final.replace(/\.mp4$/, `.part-${version}.mp4`);
       let lastPush = 0;
       try {
         await renderMp4(tl, tmp, { scale: 0.5, preset: "ultrafast", crf: 26, signal, onProgress: (f, n) => {
@@ -100,7 +163,7 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
   const rebuild = () => {
     abort?.abort();
     const t0 = performance.now();
-    const next: State = { version: state.version + 1, editable, undo: undoCount(), redo: redoCount(), file: basename(abs), time: new Date().toLocaleTimeString(), ms: 0, trailers: [] };
+    const next: State = { full: state.full, version: state.version + 1, editable, undo: undoCount(), redo: redoCount(), file: basename(abs), time: new Date().toLocaleTimeString(), ms: 0, trailers: [] };
     const nextTl = new Map<string, Timeline>();
     try { project = loadProject(abs); } catch (e) { project = undefined; next.error = errInfo(wrap(e)); }
     if (project) {
@@ -113,7 +176,8 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
           Object.assign(info, {
             dur: tl.dur, report: r.text,
             clips: tl.clips.map((c) => ({ n: c.i + 1, start: c.start, dur: c.dur, kind: c.def.kind, text: clipText(c), loc: c.def.loc, in: c.def.in.type, inDur: c.def.in.dur, inDir: c.def.in.dir,
-              from: c.def.kind === "shot" ? c.def.from : undefined, title: c.def.kind === "title" ? c.def.text : undefined, sub: c.def.kind === "title" ? c.def.sub : undefined, badge: c.def.badge })),
+              from: c.def.kind === "shot" ? c.def.from : undefined, speed: c.def.kind === "shot" ? c.def.speed : undefined,
+              srcDur: c.def.kind === "shot" ? srcDur(c.def.src) : undefined, title: c.def.kind === "title" ? c.def.text : undefined, sub: c.def.kind === "title" ? c.def.sub : undefined, badge: c.def.badge })),
             musicSrc: def.music ? basename(def.music.src) : undefined, musicVol: def.music?.vol,
             music: r.music && { hop: r.music.hop, db: r.music.db, hits: r.music.hits.map((h) => h.t) },
           });
@@ -173,16 +237,44 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
         res.end(Buffer.from(png(im.w, im.h, im.data, (b) => deflateSync(b, { level: 1 }))));
       } else if (url.pathname === "/api/proxy") {
         // MP4 with byte ranges, so the video element can seek.
-        const path = join(out, "_proxy", basename(name) + ".mp4");
-        const size = statSync(path).size, m = /bytes=(\d*)-(\d*)/.exec(req.headers.range ?? "");
-        if (m) {
-          const a = m[1] ? Number(m[1]) : size - Number(m[2]), z = m[1] && m[2] ? Number(m[2]) : size - 1;
-          res.writeHead(206, { "content-type": "video/mp4", "accept-ranges": "bytes", "content-range": `bytes ${a}-${z}/${size}`, "content-length": z - a + 1, "cache-control": "no-store" });
-          createReadStream(path, { start: a, end: z }).pipe(res);
-        } else {
-          res.writeHead(200, { "content-type": "video/mp4", "accept-ranges": "bytes", "content-length": size, "cache-control": "no-store" });
-          createReadStream(path).pipe(res);
-        }
+        sendFile(req, res, join(out, "_proxy", basename(name) + ".mp4"), "video/mp4");
+      } else if (url.pathname === "/manifest.webmanifest") {
+        res.writeHead(200, { "content-type": "application/manifest+json", "cache-control": "max-age=3600" });
+        res.end(JSON.stringify(MANIFEST));
+      } else if (url.pathname === "/icon.svg") {
+        res.writeHead(200, { "content-type": "image/svg+xml", "cache-control": "max-age=86400" });
+        res.end(ICON_SVG);
+      } else if (url.pathname === "/icon.png" || url.pathname === "/apple-touch-icon.png") {
+        const px = url.pathname === "/apple-touch-icon.png" ? 180 : [180, 192, 512].includes(Number(url.searchParams.get("s"))) ? Number(url.searchParams.get("s")) : 192;
+        res.writeHead(200, { "content-type": "image/png", "cache-control": "max-age=86400" });
+        res.end(iconAt(px));
+      } else if (url.pathname === "/api/mediafile") {
+        // A picker file itself (with byte ranges), for previewing before inserting.
+        const f = listMedia().find((m) => m.name === url.searchParams.get("f") && m.dir === url.searchParams.get("d"));
+        if (!f) { res.writeHead(404); res.end(); return; }
+        sendFile(req, res, f.path, typeOf(f.name));
+      } else if (url.pathname === "/api/srcframe") {
+        // A frame of a shot's source media at source time t: the trim filmstrip.
+        const tl = timelines.get(name), c = tl?.clips[Number(url.searchParams.get("n")) - 1];
+        if (!c || c.def.kind !== "shot") { res.writeHead(404); res.end(); return; }
+        const w = Math.max(32, Math.min(480, Number(url.searchParams.get("w")) || 160)), ts = Math.max(0, Number(url.searchParams.get("t")) || 0);
+        const still = /\.(png|jpe?g)$/i.test(c.def.src);
+        const r = spawnSync("ffmpeg", ["-v", "error", ...(still ? [] : ["-ss", ts.toFixed(3)]), "-i", c.def.src, "-frames:v", "1", "-vf", `scale=${w}:-2`, "-f", "image2", "-c:v", "mjpeg", "-"], { maxBuffer: 8 << 20 });
+        if (r.status !== 0 || !r.stdout.length) { res.writeHead(404); res.end(); return; }
+        res.writeHead(200, { "content-type": "image/jpeg", "cache-control": "max-age=600" });
+        res.end(r.stdout);
+      } else if (url.pathname === "/api/full") {
+        const f = basename(url.searchParams.get("f") ?? "");
+        if (!/\.mp4$/.test(f)) { res.writeHead(404); res.end(); return; }
+        try { statSync(join(out, "_full", f)); } catch { res.writeHead(404); res.end(); return; }
+        res.setHeader("content-disposition", `attachment; filename="${f}"`);
+        sendFile(req, res, join(out, "_full", f), "video/mp4");
+      } else if (url.pathname === "/api/render" && req.method === "POST") {
+        const reply = (code: number, j: unknown) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(j)); };
+        if (state.full && (state.full.state === "rendering" || state.full.state === "publishing")) return reply(409, { error: "a full render is already running" });
+        if (!timelines.has(name)) return reply(404, { error: "no such trailer, or it doesn't build" });
+        renderFull(name);
+        reply(202, { ok: true });
       } else if (url.pathname === "/api/media") {
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify(listMedia().map(({ name, dir }) => ({ name, dir, audio: AUDIO_RE.test(name) }))));
@@ -190,7 +282,8 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
         // A small still from a media file for the picker (first frame, 1 s in for video).
         const f = listMedia().find((m) => m.name === url.searchParams.get("f") && m.dir === url.searchParams.get("d"));
         if (!f) { res.writeHead(404); res.end(); return; }
-        const r = spawnSync("ffmpeg", ["-v", "error", ...(/\.(png|jpe?g)$/i.test(f.name) ? [] : ["-ss", "1"]), "-i", f.path, "-frames:v", "1", "-vf", "scale=240:-2", "-f", "image2", "-c:v", "mjpeg", "-"], { maxBuffer: 8 << 20 });
+        const d = /\.(png|jpe?g)$/i.test(f.name) ? undefined : srcDur(f.path);
+        const r = spawnSync("ffmpeg", ["-v", "error", ...(/\.(png|jpe?g)$/i.test(f.name) ? [] : ["-ss", (d ? d * 0.4 : 1).toFixed(2)]), "-i", f.path, "-frames:v", "1", "-vf", "scale=240:-2", "-f", "image2", "-c:v", "mjpeg", "-"], { maxBuffer: 8 << 20 });
         if (r.status !== 0 || !r.stdout.length) { res.writeHead(404); res.end(); return; }
         res.writeHead(200, { "content-type": "image/jpeg", "cache-control": "max-age=300" });
         res.end(r.stdout);
