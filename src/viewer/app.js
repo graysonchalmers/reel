@@ -1,11 +1,15 @@
 // reel live viewer. Plain browser JS, no build step.
 const $ = (id) => document.getElementById(id);
 const vid = $("vid"), still = $("still"), cv = $("tl"), g = cv.getContext("2d");
-let state, sel = localStorage.getItem("reel.sel") || undefined, t = 1, proxyKey = "";
+let sel; try { sel = localStorage.getItem("reel.sel") || undefined; } catch {}
+let state, t = 1, proxyKey = "", lastClip, trimOpen = 0, selN = 0;
 
-const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const cur = () => state?.trailers.find((x) => x.name === sel);
 const ready = () => cur()?.proxy.state === "ready";
+const clipAtT = (tr, s) => tr && [...tr.clips].reverse().find((c) => c.start <= s + 1e-6);
+const selected = () => { const tr = cur(); return tr?.clips.find((c) => c.n === selN) ?? clipAtT(tr, t); };
+const canEdit = () => !!state?.editable && !!cur() && !cur().error;
 
 // ---------------------------------------------------------------- picture
 // The proxy video plays with sound; while it isn't ready (or when stepping), the server's exact
@@ -26,62 +30,293 @@ function seek(nt, exact) {
 }
 function toggle() {
   if (!ready()) return;
-  if (vid.paused) { vid.currentTime = t; $("stage").classList.remove("still"); vid.play(); } else vid.pause();
+  setShuttle(0);
+  if (vid.paused) { vid.playbackRate = 1; vid.currentTime = t; $("stage").classList.remove("still"); vid.play(); } else vid.pause();
 }
 vid.ontimeupdate = () => { if (!vid.paused) { t = vid.currentTime; draw(); } };
 vid.onplay = () => ($("play").textContent = "❚❚ pause");
 vid.onpause = () => ($("play").textContent = "▶ play");
 $("play").onclick = toggle;
 
-// ---------------------------------------------------------------- timeline strip
-const PAD = 8;
-const xOf = (s) => PAD + (s / cur().dur) * (cv.clientWidth - PAD * 2);
-const tOf = (px) => ((px - PAD) / (cv.clientWidth - PAD * 2)) * cur().dur;
+// J/K/L shuttle: L plays forward (again = faster), J plays backward (stepped stills), K stops.
+let shuttle = 0, revTimer;
+function setShuttle(s) {
+  shuttle = s; clearInterval(revTimer);
+  if (s > 0 && ready()) { vid.playbackRate = s; vid.currentTime = t; $("stage").classList.remove("still"); vid.play(); }
+  else if (s < 0) {
+    vid.pause();
+    revTimer = setInterval(() => { if (t <= 0) return setShuttle(0); seek(t + s * 0.1, !ready()); }, 100);
+  } else vid.pause();
+}
+
+// ---------------------------------------------------------------- timeline: view, zoom, thumbnails
+const PAD = 8, RULER = 16, CY = 20;
+let zoom = 1, view0 = 0;
+const CH = () => (cv.clientHeight >= 160 || (cv.clientHeight >= 100 && !cur()?.music) ? 70 : cv.clientHeight >= 140 ? 60 : 44);
+const pps = () => ((cv.clientWidth - PAD * 2) / cur().dur) * zoom;
+const visDur = () => cur().dur / zoom;
+const clampView = () => { const tr = cur(); if (tr) view0 = Math.max(0, Math.min(tr.dur - visDur(), view0)); };
+const xOf = (s) => PAD + (s - view0) * pps();
+const tOf = (px) => view0 + (px - PAD) / pps();
+function zoomAt(f, px) {
+  const tr = cur(); if (!tr?.dur) return;
+  const at = tOf(px ?? xOf(t));
+  zoom = Math.max(1, Math.min(40, zoom * f));
+  view0 = at - (( px ?? xOf(t)) - PAD) / pps();
+  clampView(); draw();
+}
+$("zoomin").onclick = () => zoomAt(1.6);
+$("zoomout").onclick = () => zoomAt(1 / 1.6);
+// Keep the playhead in view while playing.
+function follow() {
+  if (zoom === 1) return;
+  if (t < view0 || t > view0 + visDur()) { view0 = t - visDur() * 0.1; clampView(); }
+}
+
+const thumbs = new Map();
+function thumb(tr, c) {
+  const k = `${tr.name}|${state.version}|${c.n}`;
+  let im = thumbs.get(k);
+  if (!im) {
+    if (thumbs.size > 200) thumbs.clear();
+    im = new Image();
+    im.onload = () => draw();
+    im.src = `/api/frame?name=${encodeURIComponent(tr.name)}&t=${(c.start + Math.min(c.dur * 0.5, 1)).toFixed(3)}&w=192&v=${state.version}`;
+    thumbs.set(k, im);
+  }
+  return im.complete && im.naturalWidth ? im : null;
+}
+const beats = (tr) => { const b = []; if (tr.bpm) for (let s = tr.beat0; s <= tr.dur + 1e-6; s += 60 / tr.bpm) b.push(s); return b; };
+function snap(s, skip) {
+  const tr = cur(), lim = 8 / pps();
+  let best = s, d = lim;
+  const cand = [...beats(tr), t];
+  for (const c of tr.clips) if (c.n !== skip) cand.push(c.start, c.start + c.dur);
+  for (const v of cand) if (Math.abs(v - s) < d) { d = Math.abs(v - s); best = v; }
+  return { s: best, snapped: best !== s };
+}
+
+function block(x0, x1, y, h, r) {
+  g.beginPath(); g.roundRect ? g.roundRect(x0, y, Math.max(1, x1 - x0), h, r) : g.rect(x0, y, Math.max(1, x1 - x0), h);
+}
 function draw() {
   const tr = cur(), dpr = devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
-  if (cv.width !== Math.round(w * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
   g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
   $("time").textContent = `${t.toFixed(2)}s  frame ${tr ? Math.round(t * tr.fps) : 0}`;
   if (!tr || tr.error || !tr.dur) return;
-  g.font = "11px ui-monospace, monospace";
+  if (!vid.paused || shuttle) follow();
+  const ch = CH(), wy = CY + ch + 6;
+  g.font = "11px ui-monospace, monospace"; g.textBaseline = "alphabetic";
+  // ruler + beat grid
+  const bs = beats(tr);
+  bs.forEach((s, b) => {
+    const x = xOf(s); if (x < 0 || x > w) return;
+    g.strokeStyle = `rgba(255,255,255,${b % 4 ? 0.07 : 0.22})`; g.beginPath(); g.moveTo(x, b % 4 ? 10 : 4); g.lineTo(x, h); g.stroke();
+  });
+  const step = [0.5, 1, 2, 5, 10, 20, 30, 60].find((s) => s * pps() > 60) ?? 60;
+  g.fillStyle = "#7a7a7a";
+  for (let s = Math.ceil(view0 / step) * step; s <= view0 + visDur(); s += step) g.fillText(`${+s.toFixed(1)}s`, xOf(s) + 3, 12);
+  // clip blocks with thumbnails
   for (const c of tr.clips) {
-    const x0 = xOf(c.start), x1 = xOf(c.start + c.dur);
-    g.fillStyle = c.kind === "title" ? "#4a4a4a" : "#333333"; g.fillRect(x0, 6, Math.max(1, x1 - x0 - 1), 26);
-    if (c.inDur) { g.fillStyle = "#ffb454"; g.fillRect(x0, 32, xOf(c.start + c.inDur) - x0, 3); }
-    g.fillStyle = "#e6e6e6"; if (x1 - x0 > 14) g.fillText(String(c.n), x0 + 3, 23);
+    let s0 = c.start, s1 = c.start + c.dur;
+    if (drag?.kind === "trim" && drag.c.n === c.n) { s0 = drag.s0; s1 = drag.s1; }
+    const x0 = xOf(s0) + 1, x1 = xOf(s1) - 1;
+    if (x1 < 0 || x0 > w) continue;
+    const ghost = drag?.kind === "move" && drag.on && drag.c.n === c.n;
+    g.save(); g.globalAlpha = ghost ? 0.3 : 1;
+    block(x0, x1, CY, ch, 5); g.fillStyle = c.kind === "title" ? "#3e3e3e" : "#2e2e2e"; g.fill();
+    g.save(); block(x0, x1, CY, ch, 5); g.clip();
+    const im = thumb(tr, c);
+    if (im) {
+      const tw = ch * (im.naturalWidth / im.naturalHeight);
+      for (let x = x0; x < x1; x += tw) g.drawImage(im, x, CY, tw, ch);
+      g.fillStyle = "rgba(0,0,0,0.35)"; g.fillRect(x0, CY, x1 - x0, 16);
+    }
+    if (c.inDur) { g.fillStyle = "rgba(255,255,255,0.55)"; g.beginPath(); g.moveTo(x0, CY + ch); g.lineTo(x0 + Math.min(x1 - x0, c.inDur * pps()), CY + ch); g.lineTo(x0, CY + ch - 10); g.fill(); }
+    g.fillStyle = "#f0f0f0"; if (x1 - x0 > 18) g.fillText(x1 - x0 > 70 ? `${c.n} ${c.text}`.slice(0, Math.floor((x1 - x0 - 6) / 7)) : String(c.n), x0 + 4, CY + 12);
+    g.restore();
+    const isSel = selN === c.n;
+    block(x0, x1, CY, ch, 5); g.strokeStyle = isSel ? "#ffb454" : "#4a4a4a"; g.lineWidth = isSel ? 2 : 1; g.stroke(); g.lineWidth = 1;
+    if (isSel && x1 - x0 > 24) { g.fillStyle = "#ffb454"; g.fillRect(x0 + 2, CY + ch / 2 - 9, 3, 18); g.fillRect(x1 - 5, CY + ch / 2 - 9, 3, 18); }
+    g.restore();
+    if (drag?.kind === "trim" && drag.c.n === c.n) { g.fillStyle = "#ffb454"; g.fillText(`${(s1 - s0).toFixed(2)}s`, Math.max(4, x0 + 4), CY + ch - 6); }
   }
-  if (tr.bpm) for (let s = tr.beat0, b = 0; s <= tr.dur; s += 60 / tr.bpm, b++) {
-    g.strokeStyle = `rgba(255,255,255,${b % 4 ? 0.1 : 0.3})`; g.beginPath(); g.moveTo(xOf(s), 38); g.lineTo(xOf(s), h - 6); g.stroke();
+  // dragged clip follows the pointer; amber line where it lands
+  if (drag?.kind === "move" && drag.on) {
+    const c = drag.c, x0 = drag.x - drag.grabDx, x1 = x0 + c.dur * pps();
+    g.save(); g.globalAlpha = 0.85; block(x0, x1, CY - 4, ch, 5); g.fillStyle = "#4a4a4a"; g.fill();
+    const im = thumb(tr, c); if (im) { g.save(); block(x0, x1, CY - 4, ch, 5); g.clip(); g.drawImage(im, x0, CY - 4, ch * im.naturalWidth / im.naturalHeight, ch); g.restore(); }
+    g.strokeStyle = "#ffb454"; g.lineWidth = 2; block(x0, x1, CY - 4, ch, 5); g.stroke(); g.restore();
+    const lx = xOf(slotTime(drag.to)); g.fillStyle = "#ffb454"; g.fillRect(lx - 2, CY - 8, 4, ch + 14);
   }
+  // music
   if (tr.music) {
-    const y = (db) => h - 8 - Math.max(0, Math.min(1, (db + 60) / 60)) * (h - 52);
-    g.strokeStyle = "#8a8a8a"; g.lineWidth = 1.3; g.beginPath();
+    const y = (db) => h - 6 - Math.max(0, Math.min(1, (db + 60) / 60)) * (h - wy - 10);
+    g.strokeStyle = "#7a7a7a"; g.lineWidth = 1.2; g.beginPath();
     tr.music.db.forEach((db, i) => { const x = xOf(i * tr.music.hop); i ? g.lineTo(x, y(db)) : g.moveTo(x, y(db)); });
     g.stroke(); g.lineWidth = 1;
     g.fillStyle = "#bdbdbd";
     for (const s of tr.music.hits.slice(0, 12)) { const x = xOf(s); g.beginPath(); g.moveTo(x - 4, h - 1); g.lineTo(x, h - 8); g.lineTo(x + 4, h - 1); g.fill(); }
   }
   for (const [i, n] of marks().notes.entries()) {
-    g.fillStyle = "#ffb45455"; if (n.t1 != null) g.fillRect(xOf(n.t), 38, xOf(n.t1) - xOf(n.t), h - 44);
-    g.fillStyle = "#ffb454"; g.fillText("n" + (i + 1), xOf(n.t) + 2, 50);
+    g.fillStyle = "rgba(255,255,255,0.12)"; if (n.t1 != null) g.fillRect(xOf(n.t), wy, xOf(n.t1) - xOf(n.t), h - wy);
+    g.fillStyle = "#d0d0d0"; g.fillText("n" + (i + 1), xOf(n.t) + 2, wy + 12);
   }
-  g.strokeStyle = "#ffb454"; g.lineWidth = 2; g.beginPath(); g.moveTo(xOf(t), 0); g.lineTo(xOf(t), h); g.stroke(); g.lineWidth = 1;
-  const c = [...tr.clips].reverse().find((c) => c.start <= t + 1e-6);
+  if (drag?.kind === "note" && drag.t1 !== undefined) { g.fillStyle = "rgba(255,255,255,0.18)"; g.fillRect(xOf(Math.min(drag.t0, drag.t1)), wy, Math.abs(xOf(drag.t1) - xOf(drag.t0)), h - wy); }
+  if (drag?.snapX != null) { g.strokeStyle = "rgba(255,180,84,0.6)"; g.setLineDash([3, 3]); g.beginPath(); g.moveTo(drag.snapX, 0); g.lineTo(drag.snapX, h); g.stroke(); g.setLineDash([]); }
+  // playhead
+  const px = xOf(t);
+  g.strokeStyle = "#ffb454"; g.lineWidth = 2; g.beginPath(); g.moveTo(px, 0); g.lineTo(px, h); g.stroke(); g.lineWidth = 1;
+  g.fillStyle = "#ffb454"; g.beginPath(); g.moveTo(px - 6, 0); g.lineTo(px + 6, 0); g.lineTo(px, 8); g.fill();
+  // zoom scrollbar
+  if (zoom > 1) { const sw = w - PAD * 2; g.fillStyle = "#555"; g.fillRect(PAD + (view0 / tr.dur) * sw, h - 3, sw / zoom, 3); }
+  const c = clipAtT(tr, t);
   if (c && c.n !== lastClip) { lastClip = c.n; renderClips(); }
   if (c) $("clip").textContent = `#${c.n}  ${c.start.toFixed(2)}–${(c.start + c.dur).toFixed(2)}s  ${c.in !== "cut" ? c.in + " " + c.inDur + "s · " : ""}${c.text}  ${c.loc ?? ""}`;
 }
-let drag;
-cv.onpointerdown = (e) => {
+// Where clip slot `to` (1-based, after removing the dragged clip) starts, for the drop marker.
+function slotTime(to) {
+  const rest = cur().clips.filter((c) => c.n !== drag.c.n);
+  return to - 1 < rest.length ? rest[to - 1].start : cur().dur;
+}
+
+// ---------------------------------------------------------------- timeline: pointer editing
+let drag, press;
+const pointers = new Map();
+let pinch;
+function hit(x, y, touch) {
+  const tr = cur(); if (!tr?.dur) return;
+  if (y < CY - 2 || y > CY + CH() + 2) return;
+  const c = tr.clips.find((c) => x >= xOf(c.start) && x < xOf(c.start + c.dur));
+  if (!c) return;
+  const x0 = xOf(c.start), x1 = xOf(c.start + c.dur), e = Math.min(touch ? 16 : 7, (x1 - x0) / 3);
+  return { c, edge: x - x0 < e ? "left" : x1 - x < e ? "right" : null };
+}
+cv.addEventListener("pointerdown", (e) => {
   if (!cur()?.dur) return;
-  vid.pause(); drag = { t0: tOf(e.offsetX), shift: e.shiftKey };
-  cv.setPointerCapture(e.pointerId); seek(drag.t0);
-};
-cv.onpointermove = (e) => { if (drag) { seek(tOf(e.offsetX)); drag.t1 = tOf(e.offsetX); } };
-cv.onpointerup = () => {
-  if (drag?.shift && drag.t1 !== undefined && Math.abs(drag.t1 - drag.t0) > 0.05) addNote(Math.min(drag.t0, drag.t1), Math.max(drag.t0, drag.t1));
-  drag = undefined;
-};
-addEventListener("resize", draw);
+  closeMenu();
+  pointers.set(e.pointerId, e.offsetX);
+  cv.setPointerCapture(e.pointerId);
+  if (pointers.size === 2) {
+    // two fingers: pinch zoom, cancel anything else
+    clearTimeout(press); drag = undefined;
+    const [a, b] = [...pointers.values()];
+    pinch = { d: Math.abs(a - b) || 1, z: zoom, mid: (a + b) / 2, t: tOf((a + b) / 2) };
+    return;
+  }
+  if (e.button === 2) return;
+  const h = hit(e.offsetX, e.offsetY, e.pointerType === "touch");
+  vid.pause(); setShuttle(0);
+  if (h && canEdit()) {
+    selN = h.c.n; renderClips();
+    if (h.edge) drag = { kind: "trim", c: h.c, edge: h.edge, s0: h.c.start, s1: h.c.start + h.c.dur, x: e.offsetX };
+    else drag = { kind: "move", c: h.c, x0: e.offsetX, x: e.offsetX, grabDx: e.offsetX - xOf(h.c.start), on: false, to: h.c.n };
+    if (e.pointerType !== "mouse") press = setTimeout(() => { const d = drag; drag = undefined; draw(); if (d) openMenu(d.c, e.clientX, e.clientY); }, 520);
+    draw();
+  } else if (h) { selN = h.c.n; seek(h.c.start + Math.min(0.5, h.c.dur / 2), true); renderClips(); }
+  else { const s = tOf(e.offsetX); drag = { kind: e.shiftKey ? "note" : "scrub", t0: s }; seek(s); }
+});
+cv.addEventListener("pointermove", (e) => {
+  if (pointers.has(e.pointerId)) pointers.set(e.pointerId, e.offsetX);
+  if (pinch && pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    zoom = Math.max(1, Math.min(40, pinch.z * (Math.abs(a - b) || 1) / pinch.d));
+    view0 = pinch.t - ((a + b) / 2 - PAD) / pps(); clampView(); draw();
+    return;
+  }
+  if (!drag) {
+    const h = hit(e.offsetX, e.offsetY, false);
+    cv.style.cursor = !h || !canEdit() ? "crosshair" : h.edge ? "ew-resize" : "grab";
+    return;
+  }
+  const s = tOf(e.offsetX);
+  if (drag.kind === "scrub") seek(s);
+  else if (drag.kind === "note") { drag.t1 = s; seek(s); }
+  else if (drag.kind === "trim") {
+    clearTimeout(press);
+    const c = drag.c, fps = cur().fps, sn = snap(s, c.n);
+    drag.snapX = sn.snapped ? xOf(sn.s) : null;
+    if (drag.edge === "right") drag.s1 = Math.max(c.start + 1 / fps, sn.s);
+    else {
+      const minStart = c.kind === "shot" ? c.start - (c.from ?? 0) : -Infinity;
+      drag.s0 = Math.max(minStart, Math.min(c.start + c.dur - 1 / fps, sn.s));
+    }
+    draw();
+  } else if (drag.kind === "move") {
+    drag.x = e.offsetX;
+    if (!drag.on && Math.abs(e.offsetX - drag.x0) > 6) { drag.on = true; clearTimeout(press); cv.style.cursor = "grabbing"; }
+    if (drag.on) {
+      const mid = tOf(drag.x - drag.grabDx) + drag.c.dur / 2;
+      const rest = cur().clips.filter((c) => c.n !== drag.c.n);
+      drag.to = rest.filter((c) => c.start + c.dur / 2 < mid).length + 1;
+      // scroll the zoomed view near the edges
+      if (zoom > 1 && (e.offsetX < 30 || e.offsetX > cv.clientWidth - 30)) { view0 += (e.offsetX < 30 ? -1 : 1) * visDur() * 0.02; clampView(); }
+      draw();
+    }
+  }
+});
+function endPointer(e, cancel) {
+  pointers.delete(e.pointerId);
+  if (pinch) { if (pointers.size < 2) pinch = undefined; return; }
+  clearTimeout(press);
+  const d = drag; drag = undefined;
+  if (!d || cancel) return draw();
+  if (d.kind === "note" && d.t1 !== undefined && Math.abs(d.t1 - d.t0) > 0.05) addNote(Math.min(d.t0, d.t1), Math.max(d.t0, d.t1));
+  else if (d.kind === "trim") {
+    const c = d.c, s0 = d.s0, s1 = d.s1;
+    if (Math.abs(s0 - c.start) > 1e-4 || Math.abs(s1 - (c.start + c.dur)) > 1e-4) {
+      const body = { op: "trim", n: c.n, dur: +(s1 - s0).toFixed(4) };
+      if (c.kind === "shot" && Math.abs(s0 - c.start) > 1e-4) body.from = +Math.max(0, (c.from ?? 0) + (s0 - c.start)).toFixed(4);
+      edit(body);
+    }
+  } else if (d.kind === "move") {
+    if (d.on && d.to !== d.c.n) edit({ op: "move", n: d.c.n, to: d.to });
+    else if (!d.on) seek(d.c.start + Math.min(0.5, d.c.dur / 2), true);
+  }
+  draw();
+}
+cv.addEventListener("pointerup", (e) => endPointer(e));
+cv.addEventListener("pointercancel", (e) => endPointer(e, true));
+cv.addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+  const h = hit(e.offsetX, e.offsetY, false);
+  if (h) { selN = h.c.n; renderClips(); draw(); openMenu(h.c, e.clientX, e.clientY); }
+});
+cv.addEventListener("wheel", (e) => {
+  if (!cur()?.dur) return;
+  if (e.ctrlKey || e.metaKey) { e.preventDefault(); zoomAt(Math.exp(-e.deltaY * 0.01), e.offsetX); }
+  else if (zoom > 1) { e.preventDefault(); view0 += ((Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY) / pps()); clampView(); draw(); }
+}, { passive: false });
+addEventListener("resize", () => { placeMedia(); draw(); });
+
+// ---------------------------------------------------------------- clip menu (right-click / long-press)
+const menu = $("menu");
+function openMenu(c, x, y) {
+  if (!canEdit()) return;
+  const inside = t > c.start + 1 / cur().fps && t < c.start + c.dur - 1 / cur().fps;
+  const items = [
+    ["trim…", "Open exact trim fields for this clip in the inspector", () => { trimOpen = c.n; showTab("clips"); openSheet(); renderClips(); }],
+    ["duplicate", "Put a copy of this clip right after it", () => edit({ op: "duplicate", n: c.n })],
+    ["split at playhead", inside ? "Cut this clip in two at the playhead" : "Move the playhead inside this clip to split it", () => edit({ op: "split", n: c.n, at: +(t - c.start).toFixed(4) }), !inside],
+    ["move earlier", "Swap this clip with the one before it (Alt-↑)", () => edit({ op: "move", n: c.n, to: c.n - 1 }), c.n === 1],
+    ["move later", "Swap this clip with the one after it (Alt-↓)", () => edit({ op: "move", n: c.n, to: c.n + 1 }), c.n === cur().clips.length],
+    ["delete", "Remove this clip from the edit (Delete). Undo brings it back", () => edit({ op: "delete", n: c.n }), cur().clips.length === 1, "del"],
+  ];
+  menu.innerHTML = `<div class="mh">clip ${c.n} · ${esc(c.text).slice(0, 28)}</div>`;
+  for (const [label, tip, fn, off, cls] of items) {
+    const b = document.createElement("button");
+    b.textContent = label; b.title = tip; b.disabled = !!off; if (cls) b.className = cls;
+    b.onclick = () => { closeMenu(); fn(); };
+    menu.appendChild(b);
+  }
+  menu.classList.add("open");
+  const r = menu.getBoundingClientRect();
+  menu.style.left = Math.max(8, Math.min(innerWidth - r.width - 8, x)) + "px";
+  menu.style.top = Math.max(8, Math.min(innerHeight - r.height - 8, y - r.height - 10)) + "px";
+}
+function closeMenu() { menu.classList.remove("open"); }
+addEventListener("pointerdown", (e) => { if (!menu.contains(e.target) && e.target !== cv) closeMenu(); });
 
 // ---------------------------------------------------------------- notes: feedback for Claude
 const key = () => "reel.notes." + sel;
@@ -100,9 +335,9 @@ function renderNotes() {
   $("items").innerHTML = "";
   m.notes.forEach((n, i) => {
     const li = document.createElement("li");
-    li.innerHTML = `<b>n${i + 1}</b><span>${n.t.toFixed(2)}s${n.t1 != null ? "–" + n.t1.toFixed(2) + "s" : ""} ${esc(n.text)}</span><a title="remove">×</a>`;
+    li.innerHTML = `<b>n${i + 1}</b><span title="Jump to this note">${n.t.toFixed(2)}s${n.t1 != null ? "–" + n.t1.toFixed(2) + "s" : ""} ${esc(n.text)}</span><button title="Remove this note">✕</button>`;
     li.querySelector("span").onclick = () => seek(n.t, true);
-    li.lastChild.onclick = () => { m.notes.splice(i, 1); save(m); renderNotes(); draw(); };
+    li.querySelector("button").onclick = () => { m.notes.splice(i, 1); save(m); renderNotes(); draw(); };
     $("items").appendChild(li);
   });
   $("comment").value = m.comment;
@@ -115,94 +350,187 @@ $("send").onclick = async () => {
   $("sent").textContent = r.ok ? `sent ${j.summary}. Tell Claude to "check the feedback".` : `failed: ${j.error}`;
 };
 
+// ---------------------------------------------------------------- keyboard
 addEventListener("keydown", (e) => {
-  if (e.target.tagName === "TEXTAREA" || !cur()) return;
-  const tr = cur();
+  if (/^(TEXTAREA|INPUT)$/.test(e.target.tagName) || !cur()) return;
+  const tr = cur(), mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
+  if (mod && k === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+  if (mod && k === "y") { e.preventDefault(); redo(); return; }
+  if (mod) return;
+  if (e.key === "Escape") { closeMenu(); if (drag) { drag = undefined; draw(); } return; }
   if (e.key === " ") { e.preventDefault(); toggle(); }
-  else if (e.key === "ArrowRight" || e.key === "ArrowLeft") { vid.pause(); seek(Math.round(t * tr.fps) / tr.fps + (e.key === "ArrowRight" ? 1 : -1) / tr.fps, true); }
+  else if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+    e.preventDefault();
+    const c = selected(); if (!c || !canEdit()) return;
+    const to = c.n + (e.key === "ArrowUp" ? -1 : 1);
+    if (to >= 1 && to <= tr.clips.length) { selN = to; edit({ op: "move", n: c.n, to }); }
+  } else if (e.key === "ArrowRight" || e.key === "ArrowLeft") { vid.pause(); setShuttle(0); seek(Math.round(t * tr.fps) / tr.fps + (e.key === "ArrowRight" ? 1 : -1) / tr.fps, true); }
   else if (e.key === "." || e.key === ",") {
     vid.pause();
     const starts = tr.clips.map((c) => c.start);
     const nt = e.key === "." ? starts.find((s) => s > t + 1e-3) : [...starts].reverse().find((s) => s < t - 1e-3);
     if (nt !== undefined) seek(nt, true);
-  } else if (e.key === "n") addNote(t);
+  } else if (k === "l") setShuttle(shuttle > 0 ? Math.min(8, shuttle * 2) : 1);
+  else if (k === "k") setShuttle(0);
+  else if (k === "j") setShuttle(shuttle < 0 ? Math.max(-8, shuttle * 2) : -1);
+  else if ((k === "i" || k === "o") && canEdit()) {
+    // trim the clip under the playhead so it starts (I) or ends (O) here
+    const c = clipAtT(tr, t); if (!c) return;
+    const off = t - c.start;
+    if (k === "o") { if (off >= 1 / tr.fps) edit({ op: "trim", n: c.n, dur: +off.toFixed(4) }, `clip ${c.n} out point set`); }
+    else if (off >= 1 / tr.fps && c.dur - off >= 1 / tr.fps) {
+      const body = { op: "trim", n: c.n, dur: +(c.dur - off).toFixed(4) };
+      if (c.kind === "shot") body.from = +((c.from ?? 0) + off).toFixed(4);
+      edit(body, `clip ${c.n} in point set`);
+    }
+  } else if ((e.key === "Delete" || e.key === "Backspace") && canEdit()) {
+    const c = selected(); if (c && tr.clips.length > 1) { e.preventDefault(); edit({ op: "delete", n: c.n }); }
+  } else if (k === "n") addNote(t);
 });
 
-// ---------------------------------------------------------------- list + build events
+// ---------------------------------------------------------------- list + tabs + sheet
 function renderList() {
   $("list").innerHTML = "";
   for (const tr of state?.trailers ?? []) {
     const row = document.createElement("div");
     row.className = "row" + (tr.name === sel ? " sel" : "");
+    row.title = `Open trailer ${tr.name}`;
     row.innerHTML = `<span class="nm">${esc(tr.name)}</span><span class="d">${tr.dur ? tr.dur.toFixed(1) + "s" : ""}</span>${tr.error ? '<span class="dot"></span>' : ""}`;
-    row.onclick = () => { sel = tr.name; localStorage.setItem("reel.sel", sel); proxyKey = ""; t = 1; update(); };
+    row.onclick = () => { sel = tr.name; try { localStorage.setItem("reel.sel", sel); } catch {} proxyKey = ""; t = 1; zoom = 1; view0 = 0; selN = 0; update(); };
     $("list").appendChild(row);
   }
 }
-// ---------------------------------------------------------------- clip editing (writes the .otio)
-async function edit(path, body) {
-  vid.pause();
-  const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) });
-  if (!r.ok) { const j = await r.json().catch(() => ({})); $("edithint").textContent = "edit failed: " + (j.error ?? r.status); }
+function showTab(name) {
+  for (const b of document.querySelectorAll("#tabs button")) b.classList.toggle("on", b.dataset.tab === name);
+  for (const p of document.querySelectorAll(".panel")) p.classList.toggle("on", p.id === "p-" + name);
+  if (name === "media") loadMedia();
 }
+for (const b of document.querySelectorAll("#tabs button")) b.onclick = () => showTab(b.dataset.tab);
+// Desktop shows the media bin on the left; narrower layouts keep it as a tab.
+const wide = () => matchMedia("(min-width: 1100px)").matches;
+function placeMedia() {
+  const box = $("mediabox"), want = wide() ? $("bin") : $("p-media");
+  if (box.parentElement !== want) want.appendChild(box);
+  if (wide() && $("p-media").classList.contains("on")) showTab("clips");
+}
+// Bottom sheet (phone/tablet portrait): swipe the handle up to open, down to close.
+const openSheet = () => { if (!wide()) document.body.classList.add("sheet"); };
+let sheetY;
+$("grab").addEventListener("pointerdown", (e) => { sheetY = e.clientY; $("grab").setPointerCapture(e.pointerId); });
+$("grab").addEventListener("pointerup", (e) => {
+  if (sheetY == null) return;
+  const dy = e.clientY - sheetY; sheetY = undefined;
+  if (dy < -30) document.body.classList.add("sheet");
+  else if (dy > 30) document.body.classList.remove("sheet");
+  else document.body.classList.toggle("sheet");
+});
+
+// ---------------------------------------------------------------- edits, undo/redo, toast
+const opText = (b) => ({
+  move: `clip ${b.n} moved to ${b.to}`, delete: `clip ${b.n} deleted`, trim: `clip ${b.n} trimmed`,
+  duplicate: `clip ${b.n} duplicated`, split: `clip ${b.n} split`, insert: `clip added at ${b.at}`,
+})[b.op] ?? "edited";
+let toastTimer;
+function toast(msg, opts = {}) {
+  $("toastmsg").textContent = msg;
+  $("toast").classList.toggle("bad", !!opts.bad);
+  $("toastundo").style.display = opts.undo ? "" : "none";
+  $("toastredo").style.display = opts.redo ? "" : "none";
+  $("toast").classList.add("open");
+  clearTimeout(toastTimer);
+  if (opts.bad) toastTimer = setTimeout(() => $("toast").classList.remove("open"), 6000);
+}
+$("toastx").onclick = () => $("toast").classList.remove("open");
+$("toastundo").onclick = () => undo();
+$("toastredo").onclick = () => redo();
+async function post(path, body) {
+  vid.pause(); setShuttle(0);
+  const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) toast(`${path === "/api/edit" ? "edit" : path.slice(5)} failed: ${j.error ?? r.status}`, { bad: true });
+  return r.ok ? j : null;
+}
+async function edit(body, msg) {
+  if (!canEdit()) return;
+  if (await post("/api/edit", body)) {
+    if (body.op === "move") selN = body.to; else if (body.op === "duplicate" || body.op === "split") selN = body.n + 1;
+    toast(msg ?? opText(body), { undo: true });
+  }
+}
+async function undo() { const j = state?.undo && (await post("/api/undo")); if (j) toast("undone", { redo: true, undo: j.undo > 0 }); }
+async function redo() { if (state?.redo && (await post("/api/redo"))) toast("redone", { undo: true }); }
+$("undo").onclick = undo;
+$("redo").onclick = redo;
+
+// ---------------------------------------------------------------- inspector: clip rows (button fallback)
 function renderClips() {
   const tr = cur(), ul = $("clips");
   ul.innerHTML = "";
   $("undo").disabled = !state?.editable || !state.undo;
-  $("addbtn").disabled = !state?.editable;
-  $("undo").onclick = () => edit("/api/undo");
-  $("edithint").textContent = state?.editable ? "✎ trim · ↑ ↓ move · ✕ delete · ＋ add. Changes save to the .otio and re-render." : "Read only: serve the .otio file to edit.";
+  $("redo").disabled = !state?.editable || !state.redo;
+  $("edithint").textContent = state?.editable ? "Drag clips on the timeline, or use ✎ trim · ↑ ↓ move · ⧉ duplicate · ✕ delete. Changes save to the .otio and re-render." : "Read only: serve the .otio file to edit.";
   if (!tr || tr.error) return;
-  const now = [...tr.clips].reverse().find((c) => c.start <= t + 1e-6);
+  const now = clipAtT(tr, t);
   for (const c of tr.clips) {
     const li = document.createElement("li");
-    if (now && now.n === c.n) li.className = "on";
+    if ((selN || now?.n) === c.n) li.className = "on";
     const last = c.n === tr.clips.length, ro = !state.editable;
-    li.innerHTML = `<span class="k">${c.n}</span><span class="tx">${esc(c.text)}</span><span class="d">${c.dur.toFixed(1)}s</span>` +
-      `<button ${ro ? "disabled" : ""} title="trim">✎</button><button ${ro || c.n === 1 ? "disabled" : ""} title="move earlier">↑</button><button ${ro || last ? "disabled" : ""} title="move later">↓</button><button class="del" ${ro || tr.clips.length === 1 ? "disabled" : ""} title="delete">✕</button>`;
-    const [tb, up, dn, del] = li.querySelectorAll("button");
+    li.innerHTML = `<span class="k">${c.n}</span><span class="tx" title="Jump to clip ${c.n}">${esc(c.text)}</span><span class="d">${c.dur.toFixed(1)}s</span><span class="btns">` +
+      `<button ${ro ? "disabled" : ""} title="Trim: set exact start and length">✎</button><button ${ro || c.n === 1 ? "disabled" : ""} title="Move earlier">↑</button><button ${ro || last ? "disabled" : ""} title="Move later">↓</button><button ${ro ? "disabled" : ""} title="Duplicate: copy right after">⧉</button><button class="del" ${ro || tr.clips.length === 1 ? "disabled" : ""} title="Delete this clip (undo brings it back)">✕</button></span>`;
+    const [tb, up, dn, dup, del] = li.querySelectorAll("button");
     tb.onclick = () => { trimOpen = trimOpen === c.n ? 0 : c.n; renderClips(); };
-    li.querySelector(".tx").onclick = () => seek(c.start + Math.min(0.5, c.dur / 2), true);
-    up.onclick = () => edit("/api/edit", { op: "move", n: c.n, to: c.n - 1 });
-    dn.onclick = () => edit("/api/edit", { op: "move", n: c.n, to: c.n + 1 });
-    del.onclick = () => edit("/api/edit", { op: "delete", n: c.n });
+    li.querySelector(".tx").onclick = () => { selN = c.n; seek(c.start + Math.min(0.5, c.dur / 2), true); renderClips(); };
+    up.onclick = () => edit({ op: "move", n: c.n, to: c.n - 1 });
+    dn.onclick = () => edit({ op: "move", n: c.n, to: c.n + 1 });
+    dup.onclick = () => edit({ op: "duplicate", n: c.n });
+    del.onclick = () => edit({ op: "delete", n: c.n });
     ul.appendChild(li);
     if (trimOpen === c.n) {
       const row = document.createElement("li");
       row.className = "trim";
       const shot = c.kind === "shot";
-      row.innerHTML = (shot ? `<label>start in source <input type="number" inputmode="decimal" step="0.1" min="0" value="${(c.from ?? 0).toFixed(2)}">s</label>` : "") +
-        `<label>length <input type="number" inputmode="decimal" step="0.1" min="0.1" value="${c.dur.toFixed(2)}">s</label><button class="go">apply</button>`;
+      row.innerHTML = (shot ? `<label title="Where in the source media this clip starts">start in source <input type="number" inputmode="decimal" step="0.1" min="0" value="${(c.from ?? 0).toFixed(2)}">s</label>` : "") +
+        `<label title="How long the clip plays">length <input type="number" inputmode="decimal" step="0.1" min="0.1" value="${c.dur.toFixed(2)}">s</label><button class="primary" title="Save this trim">apply</button>`;
       const ins = row.querySelectorAll("input");
       row.querySelector("button").onclick = () => {
         const body = { op: "trim", n: c.n, dur: Number(ins[ins.length - 1].value) };
         if (shot) body.from = Number(ins[0].value);
         trimOpen = 0;
-        edit("/api/edit", body);
+        edit(body);
       };
       ul.appendChild(row);
     }
   }
 }
-let trimOpen = 0;
-// ---------------------------------------------------------------- add a clip from the media folders
-$("addbtn").onclick = async () => {
+
+// ---------------------------------------------------------------- media bin: add a clip
+let mediaLoaded = false;
+async function loadMedia(force) {
+  if (mediaLoaded && !force) return renderMediaHint();
+  mediaLoaded = true;
+  const files = await (await fetch("/api/media")).json().catch(() => []);
   const pk = $("picker");
-  if (pk.classList.toggle("open")) {
-    const files = await (await fetch("/api/media")).json();
-    const tr = cur(), now = tr && [...tr.clips].reverse().find((c) => c.start <= t + 1e-6);
-    const at = now ? now.n + 1 : 1;
-    $("pickhint").textContent = files.length ? `tap a file to add a 3 s shot after clip ${at - 1 || "start"}` : "no media files found next to the edit";
-    pk.innerHTML = "";
-    for (const f of files) {
-      const fig = document.createElement("figure");
-      fig.innerHTML = `<img loading="lazy" alt="" src="/api/thumb?d=${encodeURIComponent(f.dir)}&f=${encodeURIComponent(f.name)}"><figcaption>${esc(f.dir)}/${esc(f.name)}</figcaption>`;
-      fig.onclick = () => { pk.classList.remove("open"); $("pickhint").textContent = ""; edit("/api/edit", { op: "insert", at, file: f.name, dir: f.dir, dur: 3 }); };
-      pk.appendChild(fig);
-    }
-  } else $("pickhint").textContent = "";
-};
-let lastClip;
+  pk.innerHTML = "";
+  for (const f of files) {
+    const fig = document.createElement("figure");
+    fig.title = `Add ${f.name} as a 3 s shot after the clip under the playhead`;
+    fig.innerHTML = `<img loading="lazy" alt="" src="/api/thumb?d=${encodeURIComponent(f.dir)}&f=${encodeURIComponent(f.name)}"><figcaption>${esc(f.dir)}/${esc(f.name)}</figcaption>`;
+    fig.onclick = () => {
+      if (!canEdit()) return;
+      const now = clipAtT(cur(), t), at = now ? now.n + 1 : 1;
+      edit({ op: "insert", at, file: f.name, dir: f.dir, dur: 3 });
+    };
+    pk.appendChild(fig);
+  }
+  $("pickhint").dataset.n = files.length;
+  renderMediaHint();
+}
+function renderMediaHint() {
+  const n = Number($("pickhint").dataset.n || 0), now = clipAtT(cur(), t);
+  $("pickhint").textContent = !state?.editable ? "Read only: serve the .otio file to add clips." : n ? `tap a file to add a 3 s shot after clip ${now?.n ?? "start"}` : "no media files found next to the edit";
+}
+
+// ---------------------------------------------------------------- build events
 function update() {
   renderList();
   renderClips();
@@ -210,11 +538,13 @@ function update() {
   $("err").style.display = err ? "block" : "none";
   $("err").textContent = err?.message ?? "";
   if (!tr) return;
-  $("stage").style.aspectRatio = `${tr.w} / ${tr.h}`;
+  document.body.style.setProperty("--ar", `${tr.w} / ${tr.h}`);
+  document.body.classList.toggle("nomusic", !tr.music);
   $("report").textContent = tr.report;
+  if (selN > tr.clips.length) selN = 0;
   const p = tr.proxy;
   $("proxy").textContent = p.state === "rendering" ? `proxy ${Math.round(p.progress * 100)}%` : p.state === "ready" ? "proxy ready" : p.state === "failed" ? "proxy failed" : "proxy …";
-  $("proxy").className = "pill " + (p.state === "ready" ? "ok" : p.state === "failed" ? "bad" : "");
+  $("proxy").className = "pill " + (p.state === "failed" ? "bad" : "");
   if (p.state === "failed" && p.error && !err) { $("err").style.display = "block"; $("err").textContent = p.error; }
   const k = `${tr.name}|${p.version}`;
   if (p.state === "ready" && proxyKey !== k) {
@@ -222,10 +552,15 @@ function update() {
     vid.src = `/api/proxy?name=${encodeURIComponent(tr.name)}&v=${p.version}`;
     vid.onloadeddata = () => { vid.currentTime = t; $("stage").classList.remove("still"); };
   } else if (p.state !== "ready") { vid.pause(); showStill(); }
+  if (t > tr.dur) t = Math.max(0, tr.dur - 1 / tr.fps);
+  clampView();
   renderNotes();
+  renderMediaHint();
   draw();
 }
 
+placeMedia();
+if (wide()) loadMedia();
 const es = new EventSource("/events");
 es.addEventListener("build", (e) => {
   const prev = state?.version;
@@ -233,9 +568,11 @@ es.addEventListener("build", (e) => {
   $("file").textContent = `${state.file}  v${state.version}  ${state.ms}ms`;
   const bad = state.error ? 1 : state.trailers.filter((x) => x.error).length;
   $("status").textContent = bad ? `${bad} error${bad > 1 ? "s" : ""}` : "ok";
-  $("status").className = "pill " + (bad ? "bad" : "ok");
+  $("status").className = "pill " + (bad ? "bad" : "");
   if (!sel || !state.trailers.some((x) => x.name === sel)) sel = state.trailers[0]?.name;
   if (prev !== state.version) showStill();
   update();
 });
 es.onerror = () => { $("status").textContent = "disconnected"; $("status").className = "pill bad"; };
+// for proof scripts
+window.reelViewer = { openMenuAt: (n) => { const c = cur()?.clips.find((c) => c.n === n); if (c) { const r = cv.getBoundingClientRect(); selN = n; draw(); openMenu(c, r.left + xOf(c.start + c.dur / 2), r.top + CY); } } };

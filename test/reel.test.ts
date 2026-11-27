@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -247,4 +247,45 @@ test("otio edits: trim a shot and a title, insert a shot", async () => {
   const d = fromOtio(o);
   assert.deepEqual(d.clips.map((c: any) => [c.kind, c.dur, c.kind === "shot" ? c.from : null]), [["shot", 1.5, 0.5], ["shot", 2, 0], ["title", 0.4, null]]);
   assert.equal((d.clips[1] as any).src, join(dir, "red.png"));
+});
+
+test("otio edits: duplicate and split a clip", async () => {
+  const { toOtio, fromOtio, editOtio } = await import("../src/core/otio.ts");
+  const a = loadSource(`trailer("t", { w: 64, h: 36, fps: 30 }, shot("bg.mp4", { dur: 2 }), title("A", { dur: 1, in: fade(0.2) }))`, "t.rx.js", dir).timeline("t");
+  const o = toOtio(a);
+  const dup = fromOtio(editOtio(o, { op: "duplicate", n: 2 }));
+  assert.deepEqual(dup.clips.map((c: any) => [c.kind, c.dur, c.in.type]), [["shot", 2, "cut"], ["title", 1, "fade"], ["title", 1, "fade"]]);
+  const sp = fromOtio(editOtio(o, { op: "split", n: 1, at: 0.5 }));
+  assert.deepEqual(sp.clips.map((c: any) => [c.kind, c.dur, c.kind === "shot" ? c.from : null, c.in.type]),
+    [["shot", 0.5, 0, "cut"], ["shot", 1.5, 0.5, "cut"], ["title", 1, null, "fade"]]);
+  const st = fromOtio(editOtio(o, { op: "split", n: 2, at: 0.4 }));
+  assert.deepEqual(st.clips.map((c: any) => [c.kind, Math.round(c.dur * 30), c.in.type]), [["shot", 60, "cut"], ["title", 12, "fade"], ["title", 18, "cut"]]);
+  assert.throws(() => editOtio(o, { op: "split", n: 1, at: 2 }), /inside/);
+  assert.throws(() => editOtio(o, { op: "split", n: 1, at: 0 }), /inside/);
+});
+
+test("the live viewer edits the .otio with undo and redo, and a new edit clears redo", async () => {
+  const { toOtio, fromOtio } = await import("../src/core/otio.ts");
+  const sub = join(dir, "undo-redo");
+  spawnSync("mkdir", ["-p", sub]);
+  const a = loadSource(`trailer("t", { w: 64, h: 36, fps: 30 }, shot("${join(dir, "red.png")}", { dur: 1 }), title("A", { dur: 1 }))`, "t.rx.js", dir).timeline("t");
+  const file = join(sub, "t.otio");
+  writeFileSync(file, JSON.stringify(toOtio(a)));
+  const s = await serve(file, { port: 0, log: () => {} });
+  const post = (p: string, b?: unknown) => fetch(s.url + p, { method: "POST", body: JSON.stringify(b ?? {}) }).then(async (r) => ({ status: r.status, j: await r.json() }));
+  const n = () => fromOtio(JSON.parse(readFileSync(file, "utf8"))).clips.length;
+  try {
+    assert.equal((await post("api/edit", { op: "duplicate", n: 1 })).status, 200);
+    assert.equal(n(), 3);
+    assert.equal((await post("api/redo")).status, 409);
+    const u = await post("api/undo");
+    assert.deepEqual([u.status, u.j.undo, u.j.redo, n()], [200, 0, 1, 2]);
+    const r = await post("api/redo");
+    assert.deepEqual([r.status, r.j.undo, r.j.redo, n()], [200, 1, 0, 3]);
+    await post("api/undo");
+    const e = await post("api/edit", { op: "split", n: 2, at: 0.5 });
+    assert.deepEqual([e.status, e.j.undo, e.j.redo, n()], [200, 1, 0, 3]);
+  } finally {
+    s.close();
+  }
 });

@@ -117,7 +117,11 @@ export type OtioEdit = { op: "move"; n: number; to: number } | { op: "delete"; n
   /** Seconds: `from` = where in the source the clip starts (shots only), `dur` = clip length. */
   | { op: "trim"; n: number; from?: number; dur?: number }
   /** A new shot at position `at` (1-based; past the end appends). `src` is an absolute media path. */
-  | { op: "insert"; at: number; src: string; from?: number; dur: number };
+  | { op: "insert"; at: number; src: string; from?: number; dur: number }
+  /** A copy of clip `n` (with the transition into it) right after it. */
+  | { op: "duplicate"; n: number }
+  /** Cut clip `n` in two, `at` seconds into the clip. The second half starts with a cut. */
+  | { op: "split"; n: number; at: number };
 const FIRST_OK = ["cut", "flash", "dip", "slide", "zoom"];
 export function editOtio(o: J, e: OtioEdit): J {
   const out = structuredClone(o);
@@ -156,6 +160,29 @@ export function editOtio(o: J, e: OtioEdit): J {
     if (e.dur !== undefined) sr.duration = rt(Math.max(1, Math.round(secs(e.dur, "dur", 1 / fps) * sr.duration.rate)), sr.duration.rate);
     clip.source_range = sr;
     if (isTitle && clip.media_references?.DEFAULT_MEDIA?.available_range) clip.media_references.DEFAULT_MEDIA.available_range = range(0, sr.duration.value, sr.duration.rate);
+    return finish(out, video, units);
+  }
+  if (e.op === "duplicate") {
+    units.splice(n + 1, 0, structuredClone(units[n]));
+    return finish(out, video, units);
+  }
+  if (e.op === "split") {
+    const u = units[n], clip = u[u.length - 1];
+    const isTitle = clip.metadata?.reel?.kind === "title";
+    const sr = clip.source_range ?? range(0, Math.round((clip.metadata?.reel?.dur ?? 3) * fps), fps);
+    const rate: number = sr.duration.rate, total: number = sr.duration.value;
+    const k = Math.round(secs(e.at, "at", 0) * rate);
+    if (k < 1 || k > total - 1) throw new ReelError(`split point must be inside the clip (0-${(total / rate).toFixed(2)}s)`);
+    const a = structuredClone(clip), b = structuredClone(clip);
+    a.source_range = range(sr.start_time.value, k, rate);
+    const speed: number = isTitle ? 0 : (clip.metadata?.reel?.speed ?? 1);
+    b.source_range = range(sr.start_time.value + Math.round(k * speed), total - k, rate);
+    if (b.metadata?.reel) b.metadata.reel.in = { type: "cut", dur: 0, color: "#000000", dir: "left" };
+    for (const [c, d] of [[a, k], [b, total - k]] as const) {
+      if (c.metadata?.reel && "dur" in c.metadata.reel) c.metadata.reel.dur = d / rate;
+      if (isTitle && c.media_references?.DEFAULT_MEDIA?.available_range) c.media_references.DEFAULT_MEDIA.available_range = range(0, d, rate);
+    }
+    units.splice(n, 1, [...u.slice(0, -1), a], [b]);
     return finish(out, video, units);
   }
   if (e.op === "delete") {

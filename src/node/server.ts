@@ -27,7 +27,7 @@ interface TrailerInfo {
   clips: { n: number; start: number; dur: number; kind: string; text: string; loc?: string; in: string; inDur: number; from?: number }[];
   report: string; music?: { hop: number; db: number[]; hits: number[] }; proxy: Proxy; error?: ErrInfo;
 }
-interface State { version: number; file: string; editable: boolean; undo: number; time: string; ms: number; error?: ErrInfo; trailers: TrailerInfo[] }
+interface State { version: number; file: string; editable: boolean; undo: number; redo: number; time: string; ms: number; error?: ErrInfo; trailers: TrailerInfo[] }
 
 const viewerDir = join(dirname(fileURLToPath(import.meta.url)), "..", "viewer");
 const errInfo = (e: ReelError): ErrInfo => ({ message: e.message, loc: e.loc });
@@ -41,7 +41,13 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
   let timelines = new Map<string, Timeline>();
   const editable = /\.otio$/i.test(abs);
   const histDir = join(out, "_history", basename(abs));
-  const undoCount = () => { try { return readdirSync(histDir).filter((f) => f.endsWith(".otio")).length; } catch { return 0; } };
+  const redoDir = join(histDir, "_redo");
+  const count = (d: string) => { try { return readdirSync(d).filter((f) => f.endsWith(".otio")).length; } catch { return 0; } };
+  const undoCount = () => count(histDir), redoCount = () => count(redoDir);
+  const lastIn = (d: string) => { try { return readdirSync(d).filter((f) => f.endsWith(".otio")).sort().pop(); } catch { return undefined; } };
+  // Stamps sort in time order even with several edits in one millisecond.
+  let seq = 0;
+  const stamp = () => `${Date.now()}-${String(seq++ % 1000).padStart(3, "0")}.otio`;
   // Folders the "add clip" picker offers: --media dirs, else next to the edit and ../media.
   const mediaDirs = (opts.media?.length ? opts.media.map((d) => resolve(d)) : [dirname(abs), resolve(dirname(abs), "media"), resolve(dirname(abs), ".."), resolve(dirname(abs), "..", "media")]);
   const MEDIA_RE = /\.(mp4|mov|webm|mkv|gif|png|jpe?g)$/i;
@@ -54,7 +60,7 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
     }
     return files;
   };
-  let state: State = { version: 0, editable, undo: 0, file: basename(abs), time: "", ms: 0, trailers: [] };
+  let state: State = { version: 0, editable, undo: 0, redo: 0, file: basename(abs), time: "", ms: 0, trailers: [] };
   let watched = new Set<string>();
   let timer: NodeJS.Timeout | undefined;
   let abort: AbortController | undefined;
@@ -93,7 +99,7 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
   const rebuild = () => {
     abort?.abort();
     const t0 = performance.now();
-    const next: State = { version: state.version + 1, editable, undo: undoCount(), file: basename(abs), time: new Date().toLocaleTimeString(), ms: 0, trailers: [] };
+    const next: State = { version: state.version + 1, editable, undo: undoCount(), redo: redoCount(), file: basename(abs), time: new Date().toLocaleTimeString(), ms: 0, trailers: [] };
     const nextTl = new Map<string, Timeline>();
     try { project = loadProject(abs); } catch (e) { project = undefined; next.error = errInfo(wrap(e)); }
     if (project) {
@@ -185,19 +191,24 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
         if (r.status !== 0 || !r.stdout.length) { res.writeHead(404); res.end(); return; }
         res.writeHead(200, { "content-type": "image/jpeg", "cache-control": "max-age=300" });
         res.end(r.stdout);
-      } else if ((url.pathname === "/api/edit" || url.pathname === "/api/undo") && req.method === "POST") {
-        // Edits write the master .otio (old copy kept in out/_history for undo); the watcher rebuilds.
+      } else if ((url.pathname === "/api/edit" || url.pathname === "/api/undo" || url.pathname === "/api/redo") && req.method === "POST") {
+        // Edits write the master .otio (old copy kept in out/_history for undo, undone copies in
+        // out/_history/<file>/_redo for redo); the watcher rebuilds. A new edit clears redo.
         const chunks: Buffer[] = [];
         req.on("data", (d: Buffer) => chunks.push(d));
         req.on("end", () => {
           const reply = (code: number, j: unknown) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(j)); };
           if (!editable) return reply(409, { error: "editing needs an .otio file: run `reel otio` and serve the .otio" });
           try {
-            if (url.pathname === "/api/undo") {
-              const last = readdirSync(histDir).filter((f) => f.endsWith(".otio")).sort().pop();
-              if (!last) return reply(409, { error: "nothing to undo" });
-              renameSync(join(histDir, last), abs);
-              log(`[reel] undo -> ${last}`);
+            if (url.pathname === "/api/undo" || url.pathname === "/api/redo") {
+              const undo = url.pathname === "/api/undo";
+              const [from, to] = undo ? [histDir, redoDir] : [redoDir, histDir];
+              const last = lastIn(from);
+              if (!last) return reply(409, { error: undo ? "nothing to undo" : "nothing to redo" });
+              mkdirSync(to, { recursive: true });
+              writeFileSync(join(to, stamp()), readFileSync(abs, "utf8"));
+              renameSync(join(from, last), abs);
+              log(`[reel] ${undo ? "undo" : "redo"} -> ${last}`);
             } else {
               const e = JSON.parse(Buffer.concat(chunks).toString("utf8")) as OtioEdit & { file?: string; dir?: string };
               if (e.op === "insert") {
@@ -209,12 +220,14 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
               const cur = readFileSync(abs, "utf8");
               const next = editOtio(JSON.parse(cur), e);
               mkdirSync(histDir, { recursive: true });
-              writeFileSync(join(histDir, `${Date.now()}.otio`), cur);
+              writeFileSync(join(histDir, stamp()), cur);
               writeFileSync(abs, JSON.stringify(next, null, 2) + "\n");
+              // The redo branch is dead now: park it (kept, not deleted) out of the stack.
+              if (redoCount()) renameSync(redoDir, join(histDir, `_dropped-redo-${Date.now()}`));
               log(`[reel] edit ${JSON.stringify(e)}`);
             }
             rebuild();
-            reply(200, { ok: true });
+            reply(200, { ok: true, undo: undoCount(), redo: redoCount() });
           } catch (err) { reply(400, { error: wrap(err).message }); }
         });
       } else if (url.pathname === "/api/feedback" && req.method === "POST") {
