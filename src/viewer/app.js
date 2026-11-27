@@ -149,8 +149,9 @@ function renderClips() {
   const tr = cur(), ul = $("clips");
   ul.innerHTML = "";
   $("undo").disabled = !state?.editable || !state.undo;
+  $("addbtn").disabled = !state?.editable;
   $("undo").onclick = () => edit("/api/undo");
-  $("edithint").textContent = state?.editable ? "↑ ↓ move a clip, ✕ delete it. Changes save to the .otio and re-render." : "Read only: serve the .otio file to edit.";
+  $("edithint").textContent = state?.editable ? "✎ trim · ↑ ↓ move · ✕ delete · ＋ add. Changes save to the .otio and re-render." : "Read only: serve the .otio file to edit.";
   if (!tr || tr.error) return;
   const now = [...tr.clips].reverse().find((c) => c.start <= t + 1e-6);
   for (const c of tr.clips) {
@@ -158,15 +159,49 @@ function renderClips() {
     if (now && now.n === c.n) li.className = "on";
     const last = c.n === tr.clips.length, ro = !state.editable;
     li.innerHTML = `<span class="k">${c.n}</span><span class="tx">${esc(c.text)}</span><span class="d">${c.dur.toFixed(1)}s</span>` +
-      `<button ${ro || c.n === 1 ? "disabled" : ""} title="move earlier">↑</button><button ${ro || last ? "disabled" : ""} title="move later">↓</button><button class="del" ${ro || tr.clips.length === 1 ? "disabled" : ""} title="delete">✕</button>`;
-    const [up, dn, del] = li.querySelectorAll("button");
+      `<button ${ro ? "disabled" : ""} title="trim">✎</button><button ${ro || c.n === 1 ? "disabled" : ""} title="move earlier">↑</button><button ${ro || last ? "disabled" : ""} title="move later">↓</button><button class="del" ${ro || tr.clips.length === 1 ? "disabled" : ""} title="delete">✕</button>`;
+    const [tb, up, dn, del] = li.querySelectorAll("button");
+    tb.onclick = () => { trimOpen = trimOpen === c.n ? 0 : c.n; renderClips(); };
     li.querySelector(".tx").onclick = () => seek(c.start + Math.min(0.5, c.dur / 2), true);
     up.onclick = () => edit("/api/edit", { op: "move", n: c.n, to: c.n - 1 });
     dn.onclick = () => edit("/api/edit", { op: "move", n: c.n, to: c.n + 1 });
     del.onclick = () => edit("/api/edit", { op: "delete", n: c.n });
     ul.appendChild(li);
+    if (trimOpen === c.n) {
+      const row = document.createElement("li");
+      row.className = "trim";
+      const shot = c.kind === "shot";
+      row.innerHTML = (shot ? `<label>start in source <input type="number" inputmode="decimal" step="0.1" min="0" value="${(c.from ?? 0).toFixed(2)}">s</label>` : "") +
+        `<label>length <input type="number" inputmode="decimal" step="0.1" min="0.1" value="${c.dur.toFixed(2)}">s</label><button class="go">apply</button>`;
+      const ins = row.querySelectorAll("input");
+      row.querySelector("button").onclick = () => {
+        const body = { op: "trim", n: c.n, dur: Number(ins[ins.length - 1].value) };
+        if (shot) body.from = Number(ins[0].value);
+        trimOpen = 0;
+        edit("/api/edit", body);
+      };
+      ul.appendChild(row);
+    }
   }
 }
+let trimOpen = 0;
+// ---------------------------------------------------------------- add a clip from the media folders
+$("addbtn").onclick = async () => {
+  const pk = $("picker");
+  if (pk.classList.toggle("open")) {
+    const files = await (await fetch("/api/media")).json();
+    const tr = cur(), now = tr && [...tr.clips].reverse().find((c) => c.start <= t + 1e-6);
+    const at = now ? now.n + 1 : 1;
+    $("pickhint").textContent = files.length ? `tap a file to add a 3 s shot after clip ${at - 1 || "start"}` : "no media files found next to the edit";
+    pk.innerHTML = "";
+    for (const f of files) {
+      const fig = document.createElement("figure");
+      fig.innerHTML = `<img loading="lazy" alt="" src="/api/thumb?d=${encodeURIComponent(f.dir)}&f=${encodeURIComponent(f.name)}"><figcaption>${esc(f.dir)}/${esc(f.name)}</figcaption>`;
+      fig.onclick = () => { pk.classList.remove("open"); $("pickhint").textContent = ""; edit("/api/edit", { op: "insert", at, file: f.name, dir: f.dir, dur: 3 }); };
+      pk.appendChild(fig);
+    }
+  } else $("pickhint").textContent = "";
+};
 let lastClip;
 function update() {
   renderList();
