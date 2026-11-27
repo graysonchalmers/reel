@@ -219,3 +219,19 @@ test("otio round-trip keeps the timeline and the pixels, and NLE trims come back
   assert.equal((edited.clips[0] as any).from, 0.2);
   assert.equal(edited.clips[1].in.type, "slide");
 });
+
+test("otio edits: move and delete clips, the first clip never fades in from nothing", async () => {
+  const { toOtio, fromOtio, editOtio } = await import("../src/core/otio.ts");
+  const a = loadSource(`trailer("t", { w: 64, h: 36, fps: 30 },
+    shot("red.png", { dur: 1 }), title("A", { dur: 1, in: fade(0.2) }), title("B", { dur: 1, in: fade(0.2) }))`, "t.rx.js", dir).timeline("t");
+  const o = toOtio(a);
+  const kinds = (x: any) => fromOtio(x).clips.map((c: any) => (c.kind === "title" ? c.text : "shot") + ":" + c.in.type);
+  assert.deepEqual(kinds(editOtio(o, { op: "move", n: 3, to: 1 })), ["B:cut", "shot:cut", "A:fade"]);
+  assert.deepEqual(kinds(editOtio(o, { op: "delete", n: 1 })), ["A:cut", "B:fade"]);
+  assert.deepEqual(kinds(editOtio(o, { op: "move", n: 1, to: 3 })), ["A:cut", "B:fade", "shot:cut"]);
+  assert.throws(() => editOtio(o, { op: "delete", n: 9 }));
+  // The result still resolves to a timeline.
+  const { Project } = await import("../src/core/project.ts");
+  const p = new Project(); const d = fromOtio(editOtio(o, { op: "move", n: 3, to: 1 })); p.trailers.set("t", d); p.order.push("t");
+  assert.equal(p.timeline("t").frames, 90);
+});

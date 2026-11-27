@@ -5,8 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>reel live</title>
 <style>
-  :root { --bg: #14131b; --panel: #1c1a26; --panel2: #25222f; --line: #322d40; --text: #e8e4f0; --dim: #9a93ab;
-    --accent: #ffb454; --bad: #ff6b7a; --ok: #7bd88f; --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace; }
+  /* Neutral greys only (zero saturation); colour is kept for the one highlight and status. */
+  :root { --bg: #161616; --panel: #1f1f1f; --panel2: #2a2a2a; --line: #383838; --text: #e6e6e6; --dim: #9a9a9a;
+    --accent: #ffb454; --bad: #ff6b6b; --ok: #7bd88f; --sel: #3a3a3a; --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace; }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, sans-serif; }
   body { display: grid; grid-template: "head head" 44px "list main" 1fr / 220px 1fr; }
@@ -18,7 +19,7 @@
   .pill.ok { color: var(--ok); } .pill.bad { color: var(--bad); }
   #list { grid-area: list; background: var(--panel); border-right: 1px solid var(--line); overflow: auto; padding: 6px; }
   .row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font: 12px var(--mono); }
-  .row:hover { background: var(--panel2); } .row.sel { background: #3a3150; }
+  .row:hover { background: var(--panel2); } .row.sel { background: var(--sel); box-shadow: inset 3px 0 var(--accent); }
   .row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .row .d { font-size: 10px; color: var(--dim); }
   .dot { width: 7px; height: 7px; border-radius: 9px; background: var(--bad); }
   main { grid-area: main; overflow: auto; padding: 14px 18px; }
@@ -32,13 +33,31 @@
   #tl { width: 100%; max-width: 1100px; height: 130px; display: block; background: var(--panel); border-radius: 8px; cursor: crosshair; }
   #clip { max-width: 1100px; margin-top: 8px; font: 12px var(--mono); color: var(--dim); min-height: 18px; }
   #report { margin: 10px 0; padding: 10px 12px; background: var(--panel); border-radius: 8px; font: 11.5px/1.55 var(--mono); white-space: pre; overflow-x: auto; color: var(--dim); max-width: 1100px; }
-  #err { display: none; margin-bottom: 12px; padding: 12px 14px; border-radius: 8px; background: #2b1720; border: 1px solid var(--bad); color: #ffd3d8; font: 12px/1.5 var(--mono); white-space: pre-wrap; max-width: 1100px; }
+  #err { display: none; margin-bottom: 12px; padding: 12px 14px; border-radius: 8px; background: #262626; border: 1px solid var(--bad); color: #f0f0f0; font: 12px/1.5 var(--mono); white-space: pre-wrap; max-width: 1100px; }
   #notes { max-width: 1100px; background: var(--panel); border-radius: 8px; padding: 10px 12px; }
   #notes h3 { margin: 0 0 6px; font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: 1px; color: var(--dim); }
   #items { list-style: none; margin: 0 0 8px; padding: 0; font: 12px var(--mono); }
   #items li { display: flex; gap: 8px; padding: 3px 0; } #items b { color: var(--accent); } #items span { flex: 1; } #items a { cursor: pointer; color: var(--bad); }
   textarea { width: 100%; min-height: 48px; background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: 12px var(--mono); padding: 6px; }
   .hint { font: 11px var(--mono); color: var(--dim); }
+  #edit { max-width: 1100px; margin: 8px 0 10px; background: var(--panel); border-radius: 8px; padding: 10px 12px; }
+  #edit h3 { margin: 0 0 6px; font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: 1px; color: var(--dim); display: flex; align-items: center; gap: 8px; }
+  #clips { list-style: none; margin: 0; padding: 0; }
+  #clips li { display: flex; align-items: center; gap: 8px; padding: 6px 4px; border-top: 1px solid var(--line); font: 12px var(--mono); }
+  #clips li.on { background: var(--sel); }
+  #clips .k { width: 26px; color: var(--dim); } #clips .tx { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+  #clips .d { color: var(--dim); font-size: 11px; }
+  #clips button, #undo { min-width: 40px; min-height: 36px; background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 7px; font: 600 14px var(--mono); cursor: pointer; }
+  #clips button:hover, #undo:hover { border-color: var(--accent); } #clips button:disabled, #undo:disabled { opacity: .35; }
+  #clips button.del:hover { border-color: var(--bad); color: var(--bad); }
+  #report { white-space: pre-wrap; overflow-wrap: anywhere; }
+  /* Tablet / phone: the trailer list becomes a row of chips over the player. */
+  @media (max-width: 900px) {
+    body { grid-template: "head" 44px "list" auto "main" 1fr / 1fr; }
+    #list { display: flex; gap: 6px; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+    #list .row { flex: none; } .hint.keys { display: none; }
+    main { padding: 10px 12px; }
+  }
 </style>
 </head>
 <body>
@@ -50,10 +69,15 @@
   <div id="bar">
     <button class="big" id="play">▶ play</button>
     <span id="time">0.00s</span><span class="grow"></span>
-    <span class="hint">space play · ←/→ frame · ,/. clip · n note · click the strip to scrub</span>
+    <span class="hint keys">space play · ←/→ frame · ,/. clip · n note · click the strip to scrub</span>
   </div>
   <canvas id="tl"></canvas>
   <div id="clip"></div>
+  <div id="edit">
+    <h3>clips <span class="grow"></span><button id="undo" title="undo last edit">↶ undo</button></h3>
+    <div class="hint" id="edithint"></div>
+    <ul id="clips"></ul>
+  </div>
   <div id="notes">
     <h3>notes for Claude</h3>
     <ul id="items"></ul>

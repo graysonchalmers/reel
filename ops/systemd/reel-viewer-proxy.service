@@ -1,0 +1,9 @@
+# Forwards the socket to reel and exits after 15 idle minutes, which also stops reel.
+# An open viewer tab keeps its event stream (and so the service) alive.
+[Unit]
+Description=reel viewer (on demand) proxy
+Requires=reel-viewer.service
+After=reel-viewer.service
+
+[Service]
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd --exit-idle-time=15min 127.0.0.1:18631

@@ -109,3 +109,39 @@ export function fromOtio(o: J, loc?: string): TrailerDef {
       vol: audio.metadata?.reel?.vol ?? 1, fadeOut: audio.metadata?.reel?.fadeOut ?? 1.5 } : undefined,
   } as TrailerDef;
 }
+
+/** Edits the viewer can make to the master .otio: reorder or delete a clip (1-based, as shown).
+ *  A clip moves with the transition into it. The new first clip loses its incoming transition
+ *  (nothing to blend from) unless it is one reel allows on the first clip. */
+export type OtioEdit = { op: "move"; n: number; to: number } | { op: "delete"; n: number };
+const FIRST_OK = ["cut", "flash", "dip", "slide", "zoom"];
+export function editOtio(o: J, e: OtioEdit): J {
+  const out = structuredClone(o);
+  const video = out.tracks?.children?.find((t: J) => t.kind === "Video");
+  if (!video) throw new ReelError("OTIO timeline has no video track");
+  const units: J[][] = [];
+  let pre: J[] = [];
+  for (const it of video.children as J[]) {
+    if (it.OTIO_SCHEMA?.startsWith("Clip")) { units.push([...pre, it]); pre = []; } else pre.push(it);
+  }
+  const n = e.n - 1;
+  if (!(n >= 0 && n < units.length)) throw new ReelError(`no clip ${e.n} (there are ${units.length})`);
+  if (e.op === "delete") {
+    if (units.length === 1) throw new ReelError("can't delete the last clip");
+    units.splice(n, 1);
+  } else {
+    const to = Math.max(0, Math.min(units.length - 1, e.to - 1));
+    const [u] = units.splice(n, 1);
+    units.splice(to, 0, u);
+  }
+  // Only the first unit's leading transition needs fixing; others keep theirs.
+  const first = units[0], clip = first[first.length - 1];
+  const tr = first.find((x) => x.OTIO_SCHEMA?.startsWith("Transition"));
+  const r = clip.metadata?.reel;
+  if (tr && !FIRST_OK.includes(tr.metadata?.reel?.type)) units[0] = [clip];
+  if (r?.in && !FIRST_OK.includes(r.in.type)) r.in = { ...r.in, type: "cut", dur: 0 };
+  if (units[0].length > 1 && tr && FIRST_OK.includes(tr.metadata?.reel?.type) && r) r.in = tr.metadata.reel;
+  // A unit that was first and moved later has no transition: give it a cut (already the default).
+  video.children = units.flat();
+  return out;
+}
