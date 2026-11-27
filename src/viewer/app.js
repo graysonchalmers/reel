@@ -46,27 +46,28 @@ function draw() {
   g.font = "11px ui-monospace, monospace";
   for (const c of tr.clips) {
     const x0 = xOf(c.start), x1 = xOf(c.start + c.dur);
-    g.fillStyle = c.kind === "title" ? "#4a3a6a" : "#2d4a5a"; g.fillRect(x0, 6, Math.max(1, x1 - x0 - 1), 26);
-    if (c.inDur) { g.fillStyle = "#ffb454"; g.fillRect(x0, 32, xOf(c.start + c.inDur) - x0, 3); }
-    g.fillStyle = "#e8e4f0"; if (x1 - x0 > 14) g.fillText(String(c.n), x0 + 3, 23);
+    g.fillStyle = c.kind === "title" ? "#4a4a4a" : "#303030"; g.fillRect(x0, 6, Math.max(1, x1 - x0 - 1), 26);
+    if (c.inDur) { g.fillStyle = "#8c8c8c"; g.fillRect(x0, 32, xOf(c.start + c.inDur) - x0, 3); }
+    g.fillStyle = "#e6e6e6"; if (x1 - x0 > 14) g.fillText(String(c.n), x0 + 3, 23);
   }
   if (tr.bpm) for (let s = tr.beat0, b = 0; s <= tr.dur; s += 60 / tr.bpm, b++) {
     g.strokeStyle = `rgba(255,255,255,${b % 4 ? 0.1 : 0.3})`; g.beginPath(); g.moveTo(xOf(s), 38); g.lineTo(xOf(s), h - 6); g.stroke();
   }
   if (tr.music) {
     const y = (db) => h - 8 - Math.max(0, Math.min(1, (db + 60) / 60)) * (h - 52);
-    g.strokeStyle = "#7bd88f"; g.lineWidth = 1.3; g.beginPath();
+    g.strokeStyle = "#a8a8a8"; g.lineWidth = 1.3; g.beginPath();
     tr.music.db.forEach((db, i) => { const x = xOf(i * tr.music.hop); i ? g.lineTo(x, y(db)) : g.moveTo(x, y(db)); });
     g.stroke(); g.lineWidth = 1;
-    g.fillStyle = "#ff6b7a";
+    g.fillStyle = "#cfcfcf";
     for (const s of tr.music.hits.slice(0, 12)) { const x = xOf(s); g.beginPath(); g.moveTo(x - 4, h - 1); g.lineTo(x, h - 8); g.lineTo(x + 4, h - 1); g.fill(); }
   }
   for (const [i, n] of marks().notes.entries()) {
     g.fillStyle = "#ffb45455"; if (n.t1 != null) g.fillRect(xOf(n.t), 38, xOf(n.t1) - xOf(n.t), h - 44);
     g.fillStyle = "#ffb454"; g.fillText("n" + (i + 1), xOf(n.t) + 2, 50);
   }
-  g.strokeStyle = "#ff3df0"; g.lineWidth = 2; g.beginPath(); g.moveTo(xOf(t), 0); g.lineTo(xOf(t), h); g.stroke(); g.lineWidth = 1;
+  g.strokeStyle = "#ffb454"; g.lineWidth = 2; g.beginPath(); g.moveTo(xOf(t), 0); g.lineTo(xOf(t), h); g.stroke(); g.lineWidth = 1;
   const c = [...tr.clips].reverse().find((c) => c.start <= t + 1e-6);
+  for (const li of $("cliplist").children) li.classList.toggle("on", c && li.dataset.n == c.n);
   if (c) $("clip").textContent = `#${c.n}  ${c.start.toFixed(2)}–${(c.start + c.dur).toFixed(2)}s  ${c.in !== "cut" ? c.in + " " + c.inDur + "s · " : ""}${c.text}  ${c.loc ?? ""}`;
 }
 let drag;
@@ -127,12 +128,45 @@ addEventListener("keydown", (e) => {
   } else if (e.key === "n") addNote(t);
 });
 
+// ---------------------------------------------------------------- clip edits (rewrite the trailer file)
+async function edit(path, body) {
+  $("editmsg").className = ""; $("editmsg").textContent = "saving…";
+  const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) });
+  const j = await r.json().catch(() => ({}));
+  $("editmsg").className = r.ok ? "" : "bad";
+  $("editmsg").textContent = r.ok ? "saved to the trailer file, rebuilding…" : `not saved: ${j.error}`;
+}
+function move(i, to) {
+  const tr = cur(), order = tr.clips.map((_, k) => k);
+  if (to === null) order.splice(i, 1); else { const [x] = order.splice(i, 1); order.splice(to, 0, x); }
+  edit("/api/edit", { name: tr.name, order });
+}
+$("undo").onclick = () => edit("/api/undo");
+function renderClips() {
+  const tr = cur(), ol = $("cliplist"); ol.innerHTML = "";
+  if (!tr || tr.error) return;
+  const lock = tr.editable ? `Can't edit here: ${tr.editable}. Edit the trailer file instead.` : "";
+  tr.clips.forEach((c, i) => {
+    const li = document.createElement("li"); li.dataset.n = c.n;
+    li.innerHTML = `<span class="n">${c.n}</span><span class="k">${esc(c.kind)}</span><span class="tx">${esc(c.text)}</span><span class="d">${c.dur.toFixed(1)}s</span>` +
+      `<button title="${lock || "Move up: play this clip one slot earlier"}">↑</button><button title="${lock || "Move down: play this clip one slot later"}">↓</button><button class="del" title="${lock || "Delete: remove this clip from the trailer (undo puts it back)"}">✕</button>`;
+    li.querySelector(".tx").title = "Jump to this clip";
+    li.querySelector(".tx").onclick = () => { vid.pause(); seek(c.start, true); };
+    const [up, down, del] = li.querySelectorAll("button");
+    up.disabled = !!lock || i === 0; down.disabled = !!lock || i === tr.clips.length - 1; del.disabled = !!lock || tr.clips.length < 2;
+    up.onclick = () => move(i, i - 1); down.onclick = () => move(i, i + 1);
+    del.onclick = () => confirm(`Delete clip ${c.n} (${c.text})?`) && move(i, null);
+    ol.appendChild(li);
+  });
+}
+
 // ---------------------------------------------------------------- list + build events
 function renderList() {
   $("list").innerHTML = "";
   for (const tr of state?.trailers ?? []) {
     const row = document.createElement("div");
     row.className = "row" + (tr.name === sel ? " sel" : "");
+    row.title = `Show trailer ${tr.name}`;
     row.innerHTML = `<span class="nm">${esc(tr.name)}</span><span class="d">${tr.dur ? tr.dur.toFixed(1) + "s" : ""}</span>${tr.error ? '<span class="dot"></span>' : ""}`;
     row.onclick = () => { sel = tr.name; localStorage.setItem("reel.sel", sel); proxyKey = ""; t = 0; update(); };
     $("list").appendChild(row);
@@ -157,6 +191,7 @@ function update() {
     vid.onloadeddata = () => { vid.currentTime = t; $("stage").classList.remove("still"); };
   } else if (p.state !== "ready") { vid.pause(); showStill(); }
   renderNotes();
+  renderClips();
   draw();
 }
 

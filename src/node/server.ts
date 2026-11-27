@@ -1,6 +1,6 @@
 // Live viewer server: watch the trailer file, rebuild timelines and reports on save, render a
 // half-size proxy MP4 in the background, push state over SSE, serve frames, proxies and feedback.
-import { createReadStream, readFileSync, renameSync, rmSync, statSync, unwatchFile, watchFile } from "node:fs";
+import { createReadStream, readFileSync, renameSync, rmSync, statSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,20 +9,27 @@ import { frameAt, scaled } from "../core/compose.ts";
 import { type ReelError, wrap } from "../core/errors.ts";
 import { png } from "../core/png.ts";
 import type { Project, Timeline } from "../core/project.ts";
+import { clipSpans, EditError, reorderClips } from "./edit.ts";
 import { FeedbackError, writeFeedback } from "./feedback.ts";
-import { loadProject } from "./load.ts";
+import { loadProject, loadSource } from "./load.ts";
 import { FrameSource, inspect } from "./media.ts";
 import { renderMp4 } from "./render.ts";
 import { clipText, report } from "./report.ts";
 
 export interface ServeOptions {
-  host?: string; port?: number; out?: string; log?: (line: string) => void }
+  host?: string; port?: number; out?: string; log?: (line: string) => void;
+  /** Listen on an inherited socket (systemd socket activation passes fd 3). */
+  fd?: number;
+  /** Exit after this many minutes with no viewer connected and no requests. */
+  idleMinutes?: number }
 
 interface ErrInfo { message: string; loc?: string }
 interface Proxy { state: "waiting" | "rendering" | "ready" | "failed"; progress: number; version: number; error?: string }
 interface TrailerInfo {
   name: string; w: number; h: number; fps: number; dur: number; bpm?: number; beat0: number;
   clips: { n: number; start: number; dur: number; kind: string; text: string; loc?: string; in: string; inDur: number }[];
+  /** Why the clips can't be reordered from the viewer, if they can't. */
+  editable?: string;
   report: string; music?: { hop: number; db: number[]; hits: number[] }; proxy: Proxy; error?: ErrInfo;
 }
 interface State { version: number; file: string; time: string; ms: number; error?: ErrInfo; trailers: TrailerInfo[] }
@@ -42,6 +49,8 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
   let timer: NodeJS.Timeout | undefined;
   let abort: AbortController | undefined;
   const frameSources = new Map<string, FrameSource>();
+  const history: string[] = [];
+  let lastHit = Date.now();
 
   const push = () => {
     const msg = `event: build\ndata: ${JSON.stringify(state)}\n\n`;
@@ -89,6 +98,7 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
           Object.assign(info, {
             dur: tl.dur, report: r.text,
             clips: tl.clips.map((c) => ({ n: c.i + 1, start: c.start, dur: c.dur, kind: c.def.kind, text: clipText(c), loc: c.def.loc, in: c.def.in.type, inDur: c.def.in.dur })),
+            editable: (() => { const r = clipSpans(readFileSync(abs, "utf8"), basename(abs), tl.clips.map((c) => c.def.loc)); return "why" in r ? r.why : ""; })(),
             music: r.music && { hop: r.music.hop, db: r.music.db, hits: r.music.hits.map((h) => h.t) },
           });
         } catch (e) {
@@ -120,6 +130,7 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
   }
 
   const server = createServer((req, res) => {
+    lastHit = Date.now();
     const url = new URL(req.url ?? "/", "http://x");
     const name = url.searchParams.get("name") ?? "";
     try {
@@ -157,6 +168,35 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
           res.writeHead(200, { "content-type": "video/mp4", "accept-ranges": "bytes", "content-length": size, "cache-control": "no-store" });
           createReadStream(path).pipe(res);
         }
+      } else if ((url.pathname === "/api/edit" || url.pathname === "/api/undo") && req.method === "POST") {
+        const chunks: Buffer[] = [];
+        req.on("data", (d: Buffer) => chunks.push(d));
+        req.on("end", () => {
+          const reply = (code: number, j: unknown) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(j)); };
+          try {
+            const before = readFileSync(abs, "utf8");
+            let after: string;
+            if (url.pathname === "/api/undo") {
+              const prev = history.pop();
+              if (prev === undefined) return reply(400, { error: "nothing to undo" });
+              after = prev;
+            } else {
+              const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { name: string; order: number[] };
+              const tl = timelines.get(body.name);
+              if (!tl) return reply(404, { error: "no such trailer" });
+              after = reorderClips(before, basename(abs), tl.clips.map((c) => c.def.loc), body.order);
+              // Refuse an edit that breaks the trailer (e.g. a fade-in moved to the front).
+              try { loadSource(after, basename(abs), dirname(abs)).timeline(body.name); } catch (e) { return reply(400, { error: wrap(e).message }); }
+              history.push(before);
+            }
+            writeFileSync(abs, after);
+            log(`[reel] ${url.pathname === "/api/undo" ? "undo" : "edit"} -> ${basename(abs)}`);
+            schedule();
+            reply(200, { ok: true, undo: history.length });
+          } catch (e) {
+            reply(e instanceof EditError || e instanceof SyntaxError ? 400 : 500, { error: (e as Error).message });
+          }
+        });
       } else if (url.pathname === "/api/feedback" && req.method === "POST") {
         const chunks: Buffer[] = [];
         let size = 0;
@@ -181,11 +221,18 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
       res.end(wrap(e).message);
     }
   });
-  const ping = setInterval(() => { for (const c of clients) c.write(": ping\n\n"); }, 15000);
+  const ping = setInterval(() => {
+    for (const c of clients) c.write(": ping\n\n");
+    // On demand: with nobody watching, stop; systemd's socket starts us again on the next request.
+    if (opts.idleMinutes && !clients.size && Date.now() - lastHit > opts.idleMinutes * 60000) {
+      log(`[reel] idle ${opts.idleMinutes} min, exiting`);
+      process.exit(0);
+    }
+  }, 15000);
 
   return new Promise((ok, fail) => {
     server.on("error", fail);
-    server.listen(opts.port ?? 4340, opts.host ?? "127.0.0.1", () => {
+    const ready = () => {
       const addr = server.address();
       const port = typeof addr === "object" && addr ? addr.port : opts.port;
       rebuild();
@@ -200,6 +247,8 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
           server.close();
         },
       });
-    });
+    };
+    if (opts.fd !== undefined) server.listen({ fd: opts.fd }, ready);
+    else server.listen(opts.port ?? 4340, opts.host ?? "127.0.0.1", ready);
   });
 }

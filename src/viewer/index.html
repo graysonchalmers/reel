@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>reel live</title>
 <style>
-  :root { --bg: #14131b; --panel: #1c1a26; --panel2: #25222f; --line: #322d40; --text: #e8e4f0; --dim: #9a93ab;
-    --accent: #ffb454; --bad: #ff6b7a; --ok: #7bd88f; --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace; }
+  :root { --bg: #121212; --panel: #1b1b1b; --panel2: #262626; --line: #333; --text: #e6e6e6; --dim: #8c8c8c;
+    --accent: #ffb454; --bad: #ff6b7a; --ok: #9a9a9a; --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace; }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, sans-serif; }
   body { display: grid; grid-template: "head head" 44px "list main" 1fr / 220px 1fr; }
@@ -18,7 +18,7 @@
   .pill.ok { color: var(--ok); } .pill.bad { color: var(--bad); }
   #list { grid-area: list; background: var(--panel); border-right: 1px solid var(--line); overflow: auto; padding: 6px; }
   .row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font: 12px var(--mono); }
-  .row:hover { background: var(--panel2); } .row.sel { background: #3a3150; }
+  .row:hover { background: var(--panel2); } .row.sel { background: #333; box-shadow: inset 2px 0 var(--accent); }
   .row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .row .d { font-size: 10px; color: var(--dim); }
   .dot { width: 7px; height: 7px; border-radius: 9px; background: var(--bad); }
   main { grid-area: main; overflow: auto; padding: 14px 18px; }
@@ -32,33 +32,53 @@
   #tl { width: 100%; max-width: 1100px; height: 130px; display: block; background: var(--panel); border-radius: 8px; cursor: crosshair; }
   #clip { max-width: 1100px; margin-top: 8px; font: 12px var(--mono); color: var(--dim); min-height: 18px; }
   #report { margin: 10px 0; padding: 10px 12px; background: var(--panel); border-radius: 8px; font: 11.5px/1.55 var(--mono); white-space: pre; overflow-x: auto; color: var(--dim); max-width: 1100px; }
-  #err { display: none; margin-bottom: 12px; padding: 12px 14px; border-radius: 8px; background: #2b1720; border: 1px solid var(--bad); color: #ffd3d8; font: 12px/1.5 var(--mono); white-space: pre-wrap; max-width: 1100px; }
+  #err { display: none; margin-bottom: 12px; padding: 12px 14px; border-radius: 8px; background: #241c1d; border: 1px solid var(--bad); color: #f0d6d8; font: 12px/1.5 var(--mono); white-space: pre-wrap; max-width: 1100px; }
   #notes { max-width: 1100px; background: var(--panel); border-radius: 8px; padding: 10px 12px; }
   #notes h3 { margin: 0 0 6px; font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: 1px; color: var(--dim); }
   #items { list-style: none; margin: 0 0 8px; padding: 0; font: 12px var(--mono); }
   #items li { display: flex; gap: 8px; padding: 3px 0; } #items b { color: var(--accent); } #items span { flex: 1; } #items a { cursor: pointer; color: var(--bad); }
   textarea { width: 100%; min-height: 48px; background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: 12px var(--mono); padding: 6px; }
   .hint { font: 11px var(--mono); color: var(--dim); }
+  #clips { max-width: 1100px; margin: 10px 0; background: var(--panel); border-radius: 8px; padding: 10px 12px; }
+  #clips h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: 1px; color: var(--dim); }
+  #clips ol { list-style: none; margin: 0; padding: 0; }
+  #clips li { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; font: 12px var(--mono); }
+  #clips li.on { background: var(--panel2); box-shadow: inset 2px 0 var(--accent); }
+  #clips li .n { width: 22px; color: var(--dim); } #clips li .k { width: 38px; color: var(--dim); font-size: 10px; text-transform: uppercase; }
+  #clips li .tx { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+  #clips li .d { color: var(--dim); font-size: 11px; }
+  #clips button { min-width: 34px; min-height: 30px; background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: 13px var(--mono); cursor: pointer; }
+  #clips button:hover:not(:disabled) { border-color: var(--accent); } #clips button:disabled { opacity: .35; cursor: default; }
+  #clips button.del:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); }
+  #editmsg { font: 11px var(--mono); color: var(--dim); min-height: 15px; margin-top: 4px; } #editmsg.bad { color: var(--bad); }
+  @media (max-width: 900px) {
+    body { grid-template: "head" 44px "list" auto "main" 1fr / 1fr; }
+    #list { display: flex; gap: 6px; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+    #list .row { flex: none; }
+    main { padding: 12px; }
+    .hint { display: none; }
+  }
 </style>
 </head>
 <body>
-<header><span class="logo">reel</span><span class="file" id="file"></span><span class="grow"></span><span class="pill" id="proxy">proxy</span><span class="pill" id="status">…</span></header>
+<header><span class="logo">reel</span><span class="file" id="file"></span><span class="grow"></span><span class="pill" id="proxy" title="Preview video: a half-size render for smooth playback; until it is ready you see exact single frames">proxy</span><span class="pill" id="status" title="Build status: ok, or how many trailers failed to build">…</span></header>
 <div id="list"></div>
 <main>
   <div id="err"></div>
   <div id="stage" class="still"><video id="vid" preload="auto" playsinline></video><img id="still" alt=""></div>
   <div id="bar">
-    <button class="big" id="play">▶ play</button>
+    <button class="big" id="play" title="Play / pause (space). Needs the preview video to be ready">▶ play</button>
     <span id="time">0.00s</span><span class="grow"></span>
     <span class="hint">space play · ←/→ frame · ,/. clip · n note · click the strip to scrub</span>
   </div>
-  <canvas id="tl"></canvas>
+  <canvas id="tl" title="Timeline: tap or drag to scrub; shift-drag to mark a range for a note. Light blocks are titles, dark are shots"></canvas>
   <div id="clip"></div>
+  <div id="clips"><h3>clips<span class="grow"></span><button id="undo" title="Undo: put back the clip order from before the last move or delete">↶ undo</button></h3><ol id="cliplist"></ol><div id="editmsg"></div></div>
   <div id="notes">
     <h3>notes for Claude</h3>
     <ul id="items"></ul>
-    <textarea id="comment" placeholder="overall comment (optional)"></textarea>
-    <div style="display:flex;gap:8px;align-items:center;margin-top:6px"><button class="big" id="send">send feedback</button><span class="hint" id="sent"></span></div>
+    <textarea id="comment" title="Overall comment sent to Claude with your notes" placeholder="overall comment (optional)"></textarea>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:6px"><button class="big" id="send" title="Send notes: saves them next to the trailer for Claude to read">send feedback</button><span class="hint" id="sent"></span></div>
   </div>
   <div id="report"></div>
 </main>
