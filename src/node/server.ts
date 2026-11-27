@@ -1,12 +1,13 @@
 // Live viewer server: watch the trailer file, rebuild timelines and reports on save, render a
 // half-size proxy MP4 in the background, push state over SSE, serve frames, proxies and feedback.
-import { createReadStream, readFileSync, renameSync, rmSync, statSync, unwatchFile, watchFile } from "node:fs";
+import { createReadStream, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deflateSync } from "node:zlib";
 import { frameAt, scaled } from "../core/compose.ts";
 import { type ReelError, wrap } from "../core/errors.ts";
+import { type OtioEdit, editOtio } from "../core/otio.ts";
 import { png } from "../core/png.ts";
 import type { Project, Timeline } from "../core/project.ts";
 import { FeedbackError, writeFeedback } from "./feedback.ts";
@@ -25,7 +26,7 @@ interface TrailerInfo {
   clips: { n: number; start: number; dur: number; kind: string; text: string; loc?: string; in: string; inDur: number }[];
   report: string; music?: { hop: number; db: number[]; hits: number[] }; proxy: Proxy; error?: ErrInfo;
 }
-interface State { version: number; file: string; time: string; ms: number; error?: ErrInfo; trailers: TrailerInfo[] }
+interface State { version: number; file: string; editable: boolean; undo: number; time: string; ms: number; error?: ErrInfo; trailers: TrailerInfo[] }
 
 const viewerDir = join(dirname(fileURLToPath(import.meta.url)), "..", "viewer");
 const errInfo = (e: ReelError): ErrInfo => ({ message: e.message, loc: e.loc });
@@ -37,7 +38,10 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
   const clients = new Set<ServerResponse>();
   let project: Project | undefined;
   let timelines = new Map<string, Timeline>();
-  let state: State = { version: 0, file: basename(abs), time: "", ms: 0, trailers: [] };
+  const editable = /\.otio$/i.test(abs);
+  const histDir = join(out, "_history", basename(abs));
+  const undoCount = () => { try { return readdirSync(histDir).filter((f) => f.endsWith(".otio")).length; } catch { return 0; } };
+  let state: State = { version: 0, editable, undo: 0, file: basename(abs), time: "", ms: 0, trailers: [] };
   let watched = new Set<string>();
   let timer: NodeJS.Timeout | undefined;
   let abort: AbortController | undefined;
@@ -76,7 +80,7 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
   const rebuild = () => {
     abort?.abort();
     const t0 = performance.now();
-    const next: State = { version: state.version + 1, file: basename(abs), time: new Date().toLocaleTimeString(), ms: 0, trailers: [] };
+    const next: State = { version: state.version + 1, editable, undo: undoCount(), file: basename(abs), time: new Date().toLocaleTimeString(), ms: 0, trailers: [] };
     const nextTl = new Map<string, Timeline>();
     try { project = loadProject(abs); } catch (e) { project = undefined; next.error = errInfo(wrap(e)); }
     if (project) {
@@ -157,6 +161,32 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
           res.writeHead(200, { "content-type": "video/mp4", "accept-ranges": "bytes", "content-length": size, "cache-control": "no-store" });
           createReadStream(path).pipe(res);
         }
+      } else if ((url.pathname === "/api/edit" || url.pathname === "/api/undo") && req.method === "POST") {
+        // Edits write the master .otio (old copy kept in out/_history for undo); the watcher rebuilds.
+        const chunks: Buffer[] = [];
+        req.on("data", (d: Buffer) => chunks.push(d));
+        req.on("end", () => {
+          const reply = (code: number, j: unknown) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(j)); };
+          if (!editable) return reply(409, { error: "editing needs an .otio file: run `reel otio` and serve the .otio" });
+          try {
+            if (url.pathname === "/api/undo") {
+              const last = readdirSync(histDir).filter((f) => f.endsWith(".otio")).sort().pop();
+              if (!last) return reply(409, { error: "nothing to undo" });
+              renameSync(join(histDir, last), abs);
+              log(`[reel] undo -> ${last}`);
+            } else {
+              const e = JSON.parse(Buffer.concat(chunks).toString("utf8")) as OtioEdit;
+              const cur = readFileSync(abs, "utf8");
+              const next = editOtio(JSON.parse(cur), e);
+              mkdirSync(histDir, { recursive: true });
+              writeFileSync(join(histDir, `${Date.now()}.otio`), cur);
+              writeFileSync(abs, JSON.stringify(next, null, 2) + "\n");
+              log(`[reel] edit ${JSON.stringify(e)}`);
+            }
+            rebuild();
+            reply(200, { ok: true });
+          } catch (err) { reply(400, { error: wrap(err).message }); }
+        });
       } else if (url.pathname === "/api/feedback" && req.method === "POST") {
         const chunks: Buffer[] = [];
         let size = 0;

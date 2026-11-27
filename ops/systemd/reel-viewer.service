@@ -1,0 +1,14 @@
+# The reel viewer itself, on localhost. Started by the proxy, stopped when the proxy goes idle.
+# Edit REEL_FILE with `systemctl --user edit reel-viewer` to serve another edit.
+[Unit]
+Description=reel viewer (on demand)
+StopWhenUnneeded=yes
+
+[Service]
+Environment=REEL_DIR=%h/claude-tmp/reel
+Environment=REEL_FILE=%h/claude-tmp/reel/demo/out/demo.otio
+WorkingDirectory=%h/claude-tmp/reel
+ExecStart=/usr/bin/env node bin/reel.js serve ${REEL_FILE} --host 127.0.0.1 --port 18631
+# Hold "started" until reel answers, so the first request isn't refused.
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 100); do curl -sf -o /dev/null http://127.0.0.1:18631/ && exit 0; sleep 0.1; done; exit 1'
+Restart=on-failure

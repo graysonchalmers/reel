@@ -1,0 +1,9 @@
+# On-demand reel viewer: systemd holds the tailnet port; the first visit starts reel.
+[Unit]
+Description=reel viewer (on demand) socket
+
+[Socket]
+ListenStream=18630
+
+[Install]
+WantedBy=sockets.target

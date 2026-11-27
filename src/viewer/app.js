@@ -1,7 +1,7 @@
 // reel live viewer. Plain browser JS, no build step.
 const $ = (id) => document.getElementById(id);
 const vid = $("vid"), still = $("still"), cv = $("tl"), g = cv.getContext("2d");
-let state, sel = localStorage.getItem("reel.sel") || undefined, t = 0, proxyKey = "";
+let state, sel = localStorage.getItem("reel.sel") || undefined, t = 1, proxyKey = "";
 
 const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
 const cur = () => state?.trailers.find((x) => x.name === sel);
@@ -46,27 +46,28 @@ function draw() {
   g.font = "11px ui-monospace, monospace";
   for (const c of tr.clips) {
     const x0 = xOf(c.start), x1 = xOf(c.start + c.dur);
-    g.fillStyle = c.kind === "title" ? "#4a3a6a" : "#2d4a5a"; g.fillRect(x0, 6, Math.max(1, x1 - x0 - 1), 26);
+    g.fillStyle = c.kind === "title" ? "#4a4a4a" : "#333333"; g.fillRect(x0, 6, Math.max(1, x1 - x0 - 1), 26);
     if (c.inDur) { g.fillStyle = "#ffb454"; g.fillRect(x0, 32, xOf(c.start + c.inDur) - x0, 3); }
-    g.fillStyle = "#e8e4f0"; if (x1 - x0 > 14) g.fillText(String(c.n), x0 + 3, 23);
+    g.fillStyle = "#e6e6e6"; if (x1 - x0 > 14) g.fillText(String(c.n), x0 + 3, 23);
   }
   if (tr.bpm) for (let s = tr.beat0, b = 0; s <= tr.dur; s += 60 / tr.bpm, b++) {
     g.strokeStyle = `rgba(255,255,255,${b % 4 ? 0.1 : 0.3})`; g.beginPath(); g.moveTo(xOf(s), 38); g.lineTo(xOf(s), h - 6); g.stroke();
   }
   if (tr.music) {
     const y = (db) => h - 8 - Math.max(0, Math.min(1, (db + 60) / 60)) * (h - 52);
-    g.strokeStyle = "#7bd88f"; g.lineWidth = 1.3; g.beginPath();
+    g.strokeStyle = "#8a8a8a"; g.lineWidth = 1.3; g.beginPath();
     tr.music.db.forEach((db, i) => { const x = xOf(i * tr.music.hop); i ? g.lineTo(x, y(db)) : g.moveTo(x, y(db)); });
     g.stroke(); g.lineWidth = 1;
-    g.fillStyle = "#ff6b7a";
+    g.fillStyle = "#bdbdbd";
     for (const s of tr.music.hits.slice(0, 12)) { const x = xOf(s); g.beginPath(); g.moveTo(x - 4, h - 1); g.lineTo(x, h - 8); g.lineTo(x + 4, h - 1); g.fill(); }
   }
   for (const [i, n] of marks().notes.entries()) {
     g.fillStyle = "#ffb45455"; if (n.t1 != null) g.fillRect(xOf(n.t), 38, xOf(n.t1) - xOf(n.t), h - 44);
     g.fillStyle = "#ffb454"; g.fillText("n" + (i + 1), xOf(n.t) + 2, 50);
   }
-  g.strokeStyle = "#ff3df0"; g.lineWidth = 2; g.beginPath(); g.moveTo(xOf(t), 0); g.lineTo(xOf(t), h); g.stroke(); g.lineWidth = 1;
+  g.strokeStyle = "#ffb454"; g.lineWidth = 2; g.beginPath(); g.moveTo(xOf(t), 0); g.lineTo(xOf(t), h); g.stroke(); g.lineWidth = 1;
   const c = [...tr.clips].reverse().find((c) => c.start <= t + 1e-6);
+  if (c && c.n !== lastClip) { lastClip = c.n; renderClips(); }
   if (c) $("clip").textContent = `#${c.n}  ${c.start.toFixed(2)}–${(c.start + c.dur).toFixed(2)}s  ${c.in !== "cut" ? c.in + " " + c.inDur + "s · " : ""}${c.text}  ${c.loc ?? ""}`;
 }
 let drag;
@@ -134,12 +135,42 @@ function renderList() {
     const row = document.createElement("div");
     row.className = "row" + (tr.name === sel ? " sel" : "");
     row.innerHTML = `<span class="nm">${esc(tr.name)}</span><span class="d">${tr.dur ? tr.dur.toFixed(1) + "s" : ""}</span>${tr.error ? '<span class="dot"></span>' : ""}`;
-    row.onclick = () => { sel = tr.name; localStorage.setItem("reel.sel", sel); proxyKey = ""; t = 0; update(); };
+    row.onclick = () => { sel = tr.name; localStorage.setItem("reel.sel", sel); proxyKey = ""; t = 1; update(); };
     $("list").appendChild(row);
   }
 }
+// ---------------------------------------------------------------- clip editing (writes the .otio)
+async function edit(path, body) {
+  vid.pause();
+  const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) });
+  if (!r.ok) { const j = await r.json().catch(() => ({})); $("edithint").textContent = "edit failed: " + (j.error ?? r.status); }
+}
+function renderClips() {
+  const tr = cur(), ul = $("clips");
+  ul.innerHTML = "";
+  $("undo").disabled = !state?.editable || !state.undo;
+  $("undo").onclick = () => edit("/api/undo");
+  $("edithint").textContent = state?.editable ? "↑ ↓ move a clip, ✕ delete it. Changes save to the .otio and re-render." : "Read only: serve the .otio file to edit.";
+  if (!tr || tr.error) return;
+  const now = [...tr.clips].reverse().find((c) => c.start <= t + 1e-6);
+  for (const c of tr.clips) {
+    const li = document.createElement("li");
+    if (now && now.n === c.n) li.className = "on";
+    const last = c.n === tr.clips.length, ro = !state.editable;
+    li.innerHTML = `<span class="k">${c.n}</span><span class="tx">${esc(c.text)}</span><span class="d">${c.dur.toFixed(1)}s</span>` +
+      `<button ${ro || c.n === 1 ? "disabled" : ""} title="move earlier">↑</button><button ${ro || last ? "disabled" : ""} title="move later">↓</button><button class="del" ${ro || tr.clips.length === 1 ? "disabled" : ""} title="delete">✕</button>`;
+    const [up, dn, del] = li.querySelectorAll("button");
+    li.querySelector(".tx").onclick = () => seek(c.start + Math.min(0.5, c.dur / 2), true);
+    up.onclick = () => edit("/api/edit", { op: "move", n: c.n, to: c.n - 1 });
+    dn.onclick = () => edit("/api/edit", { op: "move", n: c.n, to: c.n + 1 });
+    del.onclick = () => edit("/api/edit", { op: "delete", n: c.n });
+    ul.appendChild(li);
+  }
+}
+let lastClip;
 function update() {
   renderList();
+  renderClips();
   const tr = cur(), err = state?.error ?? tr?.error;
   $("err").style.display = err ? "block" : "none";
   $("err").textContent = err?.message ?? "";
