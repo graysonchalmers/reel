@@ -134,6 +134,8 @@ function draw() {
       g.fillStyle = "rgba(0,0,0,0.35)"; g.fillRect(x0, CY, x1 - x0, 16);
     }
     if (c.inDur) { g.fillStyle = "rgba(255,255,255,0.55)"; g.beginPath(); g.moveTo(x0, CY + ch); g.lineTo(x0 + Math.min(x1 - x0, c.inDur * pps()), CY + ch); g.lineTo(x0, CY + ch - 10); g.fill(); }
+    if (c.in !== "cut" && x1 - x0 > 60) { const lbl = `${c.in} ${c.inDur.toFixed(2)}`; g.fillStyle = "rgba(0,0,0,0.6)"; g.fillRect(x0, CY + ch - 15, g.measureText(lbl).width + 16, 15); g.fillStyle = "#d8d8d8"; g.fillText(lbl, x0 + 12, CY + ch - 4); }
+    if (c.badge && x1 - x0 > 40) { const bw = g.measureText(c.badge).width + 8; g.fillStyle = "#2a2a2a"; g.fillRect(x1 - bw - 3, CY + ch - 17, bw, 14); g.fillStyle = "#ffffff"; g.fillText(c.badge, x1 - bw + 1, CY + ch - 6); }
     g.fillStyle = "#f0f0f0"; if (x1 - x0 > 18) g.fillText(x1 - x0 > 70 ? `${c.n} ${c.text}`.slice(0, Math.floor((x1 - x0 - 6) / 7)) : String(c.n), x0 + 4, CY + 12);
     g.restore();
     const isSel = selN === c.n;
@@ -297,6 +299,9 @@ function openMenu(c, x, y) {
   const inside = t > c.start + 1 / cur().fps && t < c.start + c.dur - 1 / cur().fps;
   const items = [
     ["trim…", "Open exact trim fields for this clip in the inspector", () => { trimOpen = c.n; showTab("clips"); openSheet(); renderClips(); }],
+    ...(c.kind === "title" ? [["edit title…", "Change this title's text, sub line and length", () => openInspector(c.n)]] : []),
+    ["transition…", `Pick the transition into this clip (now: ${c.in}${c.inDur ? " " + c.inDur.toFixed(2) + "s" : ""})`, () => openInspector(c.n)],
+    [c.badge === "10x" ? "badge: 10x → 1x" : c.badge === "1x" ? "badge: 1x → off" : "badge: off → 10x", "Cycle the corner speed badge drawn over this clip: 10x, 1x, off", () => edit({ op: "badge", n: c.n, badge: c.badge === "10x" ? "1x" : c.badge === "1x" ? null : "10x" }, `clip ${c.n} badge ${c.badge === "10x" ? "1x" : c.badge === "1x" ? "off" : "10x"}`)],
     ["duplicate", "Put a copy of this clip right after it", () => edit({ op: "duplicate", n: c.n })],
     ["split at playhead", inside ? "Cut this clip in two at the playhead" : "Move the playhead inside this clip to split it", () => edit({ op: "split", n: c.n, at: +(t - c.start).toFixed(4) }), !inside],
     ["move earlier", "Swap this clip with the one before it (Alt-↑)", () => edit({ op: "move", n: c.n, to: c.n - 1 }), c.n === 1],
@@ -403,7 +408,7 @@ function renderList() {
 function showTab(name) {
   for (const b of document.querySelectorAll("#tabs button")) b.classList.toggle("on", b.dataset.tab === name);
   for (const p of document.querySelectorAll(".panel")) p.classList.toggle("on", p.id === "p-" + name);
-  if (name === "media") loadMedia();
+  if (name === "media" || name === "music") loadMedia();
 }
 for (const b of document.querySelectorAll("#tabs button")) b.onclick = () => showTab(b.dataset.tab);
 // Desktop shows the media bin on the left; narrower layouts keep it as a tab.
@@ -427,6 +432,7 @@ $("grab").addEventListener("pointerup", (e) => {
 
 // ---------------------------------------------------------------- edits, undo/redo, toast
 const opText = (b) => ({
+  title: `clip ${b.n} title edited`, trans: `clip ${b.n} transition: ${b.type}`, music: "music changed", badge: `clip ${b.n} badge`,
   move: `clip ${b.n} moved to ${b.to}`, delete: `clip ${b.n} deleted`, trim: `clip ${b.n} trimmed`,
   duplicate: `clip ${b.n} duplicated`, split: `clip ${b.n} split`, insert: `clip added at ${b.at}`,
 })[b.op] ?? "edited";
@@ -464,6 +470,7 @@ $("redo").onclick = redo;
 
 // ---------------------------------------------------------------- inspector: clip rows (button fallback)
 function renderClips() {
+  renderInspector(); renderMusic();
   const tr = cur(), ul = $("clips");
   ul.innerHTML = "";
   $("undo").disabled = !state?.editable || !state.undo;
@@ -511,7 +518,9 @@ async function loadMedia(force) {
   const files = await (await fetch("/api/media")).json().catch(() => []);
   const pk = $("picker");
   pk.innerHTML = "";
-  for (const f of files) {
+  audioFiles = files.filter((f) => f.audio);
+  renderMusic();
+  for (const f of files.filter((f) => !f.audio)) {
     const fig = document.createElement("figure");
     fig.title = `Add ${f.name} as a 3 s shot after the clip under the playhead`;
     fig.innerHTML = `<img loading="lazy" alt="" src="/api/thumb?d=${encodeURIComponent(f.dir)}&f=${encodeURIComponent(f.name)}"><figcaption>${esc(f.dir)}/${esc(f.name)}</figcaption>`;
@@ -522,13 +531,88 @@ async function loadMedia(force) {
     };
     pk.appendChild(fig);
   }
-  $("pickhint").dataset.n = files.length;
+  $("pickhint").dataset.n = files.filter((f) => !f.audio).length;
   renderMediaHint();
 }
 function renderMediaHint() {
   const n = Number($("pickhint").dataset.n || 0), now = clipAtT(cur(), t);
   $("pickhint").textContent = !state?.editable ? "Read only: serve the .otio file to add clips." : n ? `tap a file to add a 3 s shot after clip ${now?.n ?? "start"}` : "no media files found next to the edit";
 }
+
+// ---------------------------------------------------------------- inspector: title, transition, badge
+const TRANS = [["cut", "Hard cut, no blend"], ["fade", "Cross-fade from the previous clip"], ["dip", "Dip through a colour (black) between clips"], ["flash", "A white flash on the cut"], ["wipe", "Wipe across from the previous clip"], ["slide", "The new clip slides in from a side"], ["zoom", "Zoom through into the new clip"]];
+const FIRST_OK = ["cut", "flash", "dip", "slide", "zoom"];
+const TDEF = { cut: 0, fade: 0.5, dip: 0.6, flash: 0.25, wipe: 0.4, slide: 0.4, zoom: 0.5 };
+let draftTrans; // { n, type, version } picked but not applied yet
+function openInspector(n) { selN = n; showTab("clip"); openSheet(); renderClips(); draw(); }
+function renderInspector() {
+  const box = $("insp"), tr = cur(), c = selected();
+  if (!tr || tr.error || !c) { box.innerHTML = `<div class="hint">Select a clip on the timeline.</div>`; return; }
+  if (box.contains(document.activeElement) && document.activeElement.tagName === "INPUT" && box.dataset.key === `${c.n}|${state.version}`) return;
+  box.dataset.key = `${c.n}|${state.version}`;
+  const ro = !state.editable ? "disabled" : "";
+  if (draftTrans && (draftTrans.n !== c.n || draftTrans.version !== state.version)) draftTrans = undefined;
+  const ty = draftTrans?.type ?? c.in;
+  let h = `<h3>clip ${c.n} <span class="hint" style="text-transform:none;letter-spacing:0">${esc(c.text)}</span></h3>`;
+  if (c.kind === "title") h += `<div class="sec"><h3>title</h3>
+    <label class="fld" title="The big title text">text<input type="text" id="it-text" value="${esc(c.title ?? "")}" ${ro}></label>
+    <label class="fld" title="Smaller line under the title; leave empty for none">sub line<input type="text" id="it-sub" value="${esc(c.sub ?? "")}" placeholder="(none)" ${ro}></label>
+    <div class="rowf"><label class="fld" title="How long the title stays on screen">length (s)<input type="number" id="it-dur" step="0.1" min="0.1" value="${c.dur.toFixed(2)}" ${ro}></label>
+    <button class="primary" id="it-apply" title="Save the title text, sub line and length" ${ro}>apply title</button></div></div>`;
+  h += `<div class="sec"><h3>transition in</h3><div class="seg" id="it-trans">` +
+    TRANS.map(([k, tip]) => `<button data-t="${k}" class="${k === ty ? "on" : ""}" title="${tip}${c.n === 1 && !FIRST_OK.includes(k) ? " (not on the first clip)" : ""}" ${ro || (c.n === 1 && !FIRST_OK.includes(k)) ? "disabled" : ""}>${k}</button>`).join("") + `</div>
+    <div class="rowf"><label class="fld" title="Transition length in seconds">duration (s)<input type="number" id="it-tdur" step="0.05" min="0.01" max="10" value="${(ty === c.in ? c.inDur : TDEF[ty]).toFixed(2)}" ${ro || ty === "cut" ? "disabled" : ""}></label>
+    <label class="fld" title="Side the new clip slides in from" style="${ty === "slide" ? "" : "display:none"}">from<select id="it-dir" ${ro}>${["left", "right", "up", "down"].map((d) => `<option ${d === (c.inDir ?? "left") ? "selected" : ""}>${d}</option>`).join("")}</select></label>
+    <button class="primary" id="it-tapply" title="Save the transition into this clip" ${ro}>apply transition</button></div></div>`;
+  h += `<div class="sec"><h3>speed badge</h3><div class="seg" id="it-badge">` +
+    [["", "off", "No badge"], ["1x", "1x", "Show a 1x badge in the top-right corner"], ["10x", "10x", "Show a 10x badge in the top-right corner (sped-up footage)"]]
+      .map(([v, l, tip]) => `<button data-b="${v}" class="${(c.badge ?? "") === v ? "on" : ""}" title="${tip}" ${ro}>${l}</button>`).join("") + `</div>
+    <div class="hint">A grey plate with white text, drawn over the clip in the render.</div></div>`;
+  box.innerHTML = h;
+  if (c.kind === "title") $("it-apply").onclick = () => {
+    const body = { op: "title", n: c.n, dur: Number($("it-dur").value) };
+    if ($("it-text").value !== c.title) body.text = $("it-text").value;
+    if ($("it-sub").value !== (c.sub ?? "")) body.sub = $("it-sub").value || null;
+    edit(body, `clip ${c.n} title edited`);
+  };
+  for (const b of box.querySelectorAll("#it-trans button")) b.onclick = () => { draftTrans = { n: c.n, type: b.dataset.t, version: state.version }; box.dataset.key = ""; renderInspector(); };
+  $("it-tapply").onclick = () => {
+    const body = { op: "trans", n: c.n, type: ty };
+    if (ty !== "cut") body.dur = Number($("it-tdur").value);
+    if (ty === "slide") body.dir = $("it-dir").value;
+    draftTrans = undefined;
+    edit(body, `clip ${c.n} transition: ${ty}`);
+  };
+  for (const b of box.querySelectorAll("#it-badge button")) b.onclick = () => edit({ op: "badge", n: c.n, badge: b.dataset.b || null }, `clip ${c.n} badge ${b.dataset.b || "off"}`);
+}
+// ---------------------------------------------------------------- music panel
+let audioFiles = [], musicPick;
+function renderMusic() {
+  const box = $("musicbox"), tr = cur();
+  if (!tr || tr.error) { box.innerHTML = ""; return; }
+  if (box.contains(document.activeElement) && document.activeElement.type === "range") return;
+  const ro = !state.editable ? "disabled" : "", curName = tr.musicSrc ?? "";
+  const pick = musicPick ?? curName;
+  const vol = tr.musicVol ?? 1;
+  box.innerHTML = `<h3>music</h3><div class="hint" style="margin-bottom:8px">Now: ${tr.musicSrc ? esc(tr.musicSrc) + " at " + Math.round(vol * 100) + "%" : "no music"}</div>
+    <div class="tracks">` +
+    `<button data-f="" class="${pick === "" ? "on" : ""}" title="No music track" ${ro}>none</button>` +
+    audioFiles.map((f) => `<button data-f="${esc(f.name)}" data-d="${esc(f.dir)}" class="${pick === f.name ? "on" : ""}" title="Use ${esc(f.name)} as the trailer's music" ${ro}>♪ ${esc(f.dir)}/${esc(f.name)}</button>`).join("") +
+    (audioFiles.length ? "" : `<div class="hint">No audio files (wav, mp3, ogg, m4a) found in the media folders.</div>`) + `</div>
+    <label class="fld" title="Music volume: 100% is as recorded">volume <span id="m-vl">${Math.round(vol * 100)}%</span><input type="range" id="m-vol" min="0" max="200" step="5" value="${Math.round(vol * 100)}" ${ro}></label>
+    <button class="primary" id="m-apply" title="Save the music track and volume" ${ro}>apply music</button>`;
+  for (const b of box.querySelectorAll(".tracks button")) b.onclick = () => { musicPick = b.dataset.f; musicDir = b.dataset.d; renderMusic(); };
+  $("m-vol").oninput = () => ($("m-vl").textContent = $("m-vol").value + "%");
+  $("m-apply").onclick = () => {
+    const v = Number($("m-vol").value) / 100;
+    if (pick === "") { if (tr.musicSrc) edit({ op: "music", src: null }, "music removed"); musicPick = undefined; return; }
+    const body = { op: "music", vol: v };
+    if (pick !== curName) { const f = audioFiles.find((x) => x.name === pick && (!musicDir || x.dir === musicDir)); body.file = f.name; body.dir = f.dir; }
+    musicPick = undefined;
+    edit(body, pick !== curName ? `music: ${pick}` : `music volume ${Math.round(v * 100)}%`);
+  };
+}
+let musicDir;
 
 // ---------------------------------------------------------------- build events
 function update() {
@@ -560,7 +644,7 @@ function update() {
 }
 
 placeMedia();
-if (wide()) loadMedia();
+loadMedia();
 const es = new EventSource("/events");
 es.addEventListener("build", (e) => {
   const prev = state?.version;

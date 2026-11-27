@@ -4,7 +4,7 @@
 // transitions); reel-only settings (moves, grades, titles, overlays) ride in metadata.reel.
 // Pure: no file system.
 import { ReelError } from "./errors.ts";
-import type { ClipDef, Timeline, TrailerDef, TransType } from "./project.ts";
+import { type ClipDef, type Timeline, type TrailerDef, type TransType, TRANS, makeTrans } from "./project.ts";
 
 type J = Record<string, any>;
 const rt = (value: number, rate: number) => ({ OTIO_SCHEMA: "RationalTime.1", rate, value });
@@ -121,7 +121,15 @@ export type OtioEdit = { op: "move"; n: number; to: number } | { op: "delete"; n
   /** A copy of clip `n` (with the transition into it) right after it. */
   | { op: "duplicate"; n: number }
   /** Cut clip `n` in two, `at` seconds into the clip. The second half starts with a cut. */
-  | { op: "split"; n: number; at: number };
+  | { op: "split"; n: number; at: number }
+  /** A title's text, sub line (null removes it) and length in seconds. */
+  | { op: "title"; n: number; text?: string; sub?: string | null; dur?: number }
+  /** The transition into clip `n`; `dir` is for slide, `color` for dip/flash. */
+  | { op: "trans"; n: number; type: TransType; dur?: number; dir?: string; color?: string }
+  /** The trailer's music: a media file (absolute path) and volume, or `src: null` for none. */
+  | { op: "music"; src?: string | null; vol?: number; from?: number }
+  /** A corner badge over clip `n` (e.g. "10x"), or null to remove it. */
+  | { op: "badge"; n: number; badge: string | null };
 const FIRST_OK = ["cut", "flash", "dip", "slide", "zoom"];
 export function editOtio(o: J, e: OtioEdit): J {
   const out = structuredClone(o);
@@ -147,6 +155,27 @@ export function editOtio(o: J, e: OtioEdit): J {
     units.splice(Math.max(0, Math.min(units.length, Math.round(e.at) - 1)), 0, [clip]);
     return finish(out, video, units);
   }
+  if (e.op === "music") {
+    const tracks: J[] = out.tracks.children;
+    const i = tracks.findIndex((t) => t.kind === "Audio");
+    const old = i >= 0 ? tracks[i].children?.find((c: J) => c.OTIO_SCHEMA?.startsWith("Clip")) : undefined;
+    if (e.src === null) { if (i >= 0) tracks.splice(i, 1); return out; }
+    const oref = old && (old.media_references?.[old.active_media_reference_key ?? "DEFAULT_MEDIA"] ?? old.media_reference);
+    const src = e.src ?? (oref?.target_url ? unurl(oref.target_url) : undefined);
+    if (typeof src !== "string" || !src) throw new ReelError("music needs a media file");
+    const vol = e.vol === undefined ? (old?.metadata?.reel?.vol ?? 1) : secs(e.vol, "vol", 0);
+    if (vol > 4) throw new ReelError("vol must be <= 4");
+    const from = e.from === undefined ? (old?.source_range ? old.source_range.start_time.value / old.source_range.start_time.rate : 0) : secs(e.from, "from", 0);
+    let frames = 0;
+    for (const u of units) { const c = u[u.length - 1]; frames += c.source_range ? Math.round(c.source_range.duration.value * fps / c.source_range.duration.rate) : 0; }
+    const clip = { OTIO_SCHEMA: "Clip.2", name: "music", metadata: { reel: { vol, fadeOut: old?.metadata?.reel?.fadeOut ?? 1.5 } },
+      source_range: range(Math.round(from * fps), Math.max(1, frames), fps),
+      media_references: { DEFAULT_MEDIA: { OTIO_SCHEMA: "ExternalReference.1", target_url: url(src), available_range: null, metadata: {} } },
+      active_media_reference_key: "DEFAULT_MEDIA" };
+    const track = { OTIO_SCHEMA: "Track.1", name: "A1", kind: "Audio", metadata: {}, children: [clip] };
+    if (i >= 0) tracks[i] = track; else tracks.push(track);
+    return out;
+  }
   const n = e.n - 1;
   if (!(n >= 0 && n < units.length)) throw new ReelError(`no clip ${e.n} (there are ${units.length})`);
   if (e.op === "trim") {
@@ -160,6 +189,54 @@ export function editOtio(o: J, e: OtioEdit): J {
     if (e.dur !== undefined) sr.duration = rt(Math.max(1, Math.round(secs(e.dur, "dur", 1 / fps) * sr.duration.rate)), sr.duration.rate);
     clip.source_range = sr;
     if (isTitle && clip.media_references?.DEFAULT_MEDIA?.available_range) clip.media_references.DEFAULT_MEDIA.available_range = range(0, sr.duration.value, sr.duration.rate);
+    return finish(out, video, units);
+  }
+  if (e.op === "title") {
+    const u = units[n], clip = u[u.length - 1], r = clip.metadata?.reel;
+    const ref = clip.media_references?.DEFAULT_MEDIA;
+    if (r?.kind !== "title" && ref?.generator_kind !== "reel.title") throw new ReelError(`clip ${e.n} is not a title`);
+    const params = ref.parameters ?? (ref.parameters = {});
+    if (e.text !== undefined) {
+      if (typeof e.text !== "string" || !e.text.trim()) throw new ReelError("title text can't be empty");
+      params.text = e.text; if (r) r.text = e.text;
+      clip.name = `title ${JSON.stringify(e.text.length > 24 ? e.text.slice(0, 23) + "…" : e.text)}`;
+    }
+    if (e.sub !== undefined) {
+      if (e.sub !== null && typeof e.sub !== "string") throw new ReelError("sub must be text or null");
+      const sub = e.sub && e.sub.trim() ? e.sub : null;
+      params.sub = sub; if (r) { if (sub) r.sub = sub; else delete r.sub; }
+    }
+    if (e.dur !== undefined) {
+      const k = Math.max(1, Math.round(secs(e.dur, "dur", 1 / fps) * fps));
+      clip.source_range = range(0, k, fps);
+      if (ref.available_range) ref.available_range = range(0, k, fps);
+      if (r && "dur" in r) r.dur = k / fps;
+    }
+    return finish(out, video, units);
+  }
+  if (e.op === "trans") {
+    if (!TRANS.includes(e.type)) throw new ReelError(`transition must be one of ${TRANS.join(", ")}`);
+    if (n === 0 && !FIRST_OK.includes(e.type)) throw new ReelError(`the first clip can't ${e.type} in (nothing before it); use ${FIRST_OK.join(", ")}`);
+    const t = makeTrans(e.type, e.type === "cut" ? undefined : e.dur, e.type === "slide" ? (e.dir ?? "left") : e.color);
+    const reel = { ...t } as J; delete reel.__trans;
+    const u = units[n], clip = u[u.length - 1];
+    clip.metadata ??= {}; clip.metadata.reel ??= {};
+    clip.metadata.reel.in = { __trans: true, ...reel };
+    const lead: J[] = [];
+    if (n > 0 && e.type !== "cut") {
+      const half = Math.round((t.dur * fps) / 2);
+      lead.push({ OTIO_SCHEMA: "Transition.1", name: e.type, transition_type: OTIO_TRANS[e.type] ?? "Custom_Transition",
+        in_offset: rt(half, fps), out_offset: rt(half, fps), metadata: { reel: { __trans: true, ...reel } } });
+    }
+    units[n] = [...lead, clip];
+    return finish(out, video, units);
+  }
+  if (e.op === "badge") {
+    const u = units[n], clip = u[u.length - 1];
+    clip.metadata ??= {}; clip.metadata.reel ??= {};
+    if (e.badge === null || e.badge === "") delete clip.metadata.reel.badge;
+    else if (typeof e.badge !== "string" || e.badge.length > 12) throw new ReelError("badge must be short text (12 characters max)");
+    else clip.metadata.reel.badge = e.badge;
     return finish(out, video, units);
   }
   if (e.op === "duplicate") {

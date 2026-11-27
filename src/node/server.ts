@@ -24,7 +24,8 @@ interface ErrInfo { message: string; loc?: string }
 interface Proxy { state: "waiting" | "rendering" | "ready" | "failed"; progress: number; version: number; error?: string }
 interface TrailerInfo {
   name: string; w: number; h: number; fps: number; dur: number; bpm?: number; beat0: number;
-  clips: { n: number; start: number; dur: number; kind: string; text: string; loc?: string; in: string; inDur: number; from?: number }[];
+  clips: { n: number; start: number; dur: number; kind: string; text: string; loc?: string; in: string; inDur: number; inDir?: string; from?: number; title?: string; sub?: string; badge?: string }[];
+  musicSrc?: string; musicVol?: number;
   report: string; music?: { hop: number; db: number[]; hits: number[] }; proxy: Proxy; error?: ErrInfo;
 }
 interface State { version: number; file: string; editable: boolean; undo: number; redo: number; time: string; ms: number; error?: ErrInfo; trailers: TrailerInfo[] }
@@ -50,7 +51,7 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
   const stamp = () => `${Date.now()}-${String(seq++ % 1000).padStart(3, "0")}.otio`;
   // Folders the "add clip" picker offers: --media dirs, else next to the edit and ../media.
   const mediaDirs = (opts.media?.length ? opts.media.map((d) => resolve(d)) : [dirname(abs), resolve(dirname(abs), "media"), resolve(dirname(abs), ".."), resolve(dirname(abs), "..", "media")]);
-  const MEDIA_RE = /\.(mp4|mov|webm|mkv|gif|png|jpe?g)$/i;
+  const MEDIA_RE = /\.(mp4|mov|webm|mkv|gif|png|jpe?g|wav|mp3|ogg|m4a|flac)$/i, AUDIO_RE = /\.(wav|mp3|ogg|m4a|flac)$/i;
   const listMedia = () => {
     const files: { name: string; path: string; dir: string }[] = [];
     for (const d of [...new Set(mediaDirs)]) {
@@ -111,7 +112,9 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
           nextTl.set(name, tl);
           Object.assign(info, {
             dur: tl.dur, report: r.text,
-            clips: tl.clips.map((c) => ({ n: c.i + 1, start: c.start, dur: c.dur, kind: c.def.kind, text: clipText(c), loc: c.def.loc, in: c.def.in.type, inDur: c.def.in.dur, from: c.def.kind === "shot" ? c.def.from : undefined })),
+            clips: tl.clips.map((c) => ({ n: c.i + 1, start: c.start, dur: c.dur, kind: c.def.kind, text: clipText(c), loc: c.def.loc, in: c.def.in.type, inDur: c.def.in.dur, inDir: c.def.in.dir,
+              from: c.def.kind === "shot" ? c.def.from : undefined, title: c.def.kind === "title" ? c.def.text : undefined, sub: c.def.kind === "title" ? c.def.sub : undefined, badge: c.def.badge })),
+            musicSrc: def.music ? basename(def.music.src) : undefined, musicVol: def.music?.vol,
             music: r.music && { hop: r.music.hop, db: r.music.db, hits: r.music.hits.map((h) => h.t) },
           });
         } catch (e) {
@@ -182,7 +185,7 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
         }
       } else if (url.pathname === "/api/media") {
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-        res.end(JSON.stringify(listMedia().map(({ name, dir }) => ({ name, dir }))));
+        res.end(JSON.stringify(listMedia().map(({ name, dir }) => ({ name, dir, audio: AUDIO_RE.test(name) }))));
       } else if (url.pathname === "/api/thumb") {
         // A small still from a media file for the picker (first frame, 1 s in for video).
         const f = listMedia().find((m) => m.name === url.searchParams.get("f") && m.dir === url.searchParams.get("d"));
@@ -211,9 +214,14 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
               log(`[reel] ${undo ? "undo" : "redo"} -> ${last}`);
             } else {
               const e = JSON.parse(Buffer.concat(chunks).toString("utf8")) as OtioEdit & { file?: string; dir?: string };
+              if (e.op === "music" && e.src !== null && e.file !== undefined) {
+                const f = listMedia().find((m) => m.name === e.file && m.dir === e.dir && AUDIO_RE.test(m.name));
+                if (!f) throw new Error(`no audio file '${e.file}'`);
+                e.src = f.path;
+              } else if (e.op === "music" && e.src !== null) delete e.src;
               if (e.op === "insert") {
                 // Only files the picker offers can be added.
-                const f = listMedia().find((m) => m.name === e.file && m.dir === e.dir);
+                const f = listMedia().find((m) => m.name === e.file && m.dir === e.dir && !AUDIO_RE.test(m.name));
                 if (!f) throw new Error(`no media file '${e.file}'`);
                 e.src = f.path;
               }

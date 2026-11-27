@@ -37,7 +37,9 @@ export interface Grade {
   vignette: number;
 }
 
-interface ClipBase { label: string; loc?: string; dur: number | undefined; beats: number | undefined; in: Trans; sfx: Sfx[]; overlays: Overlay[]; grade?: Grade }
+interface ClipBase { label: string; loc?: string; dur: number | undefined; beats: number | undefined; in: Trans; sfx: Sfx[]; overlays: Overlay[]; grade?: Grade
+  /** A small corner label over the clip, e.g. a speed "10x". */
+  badge?: string }
 export interface ShotDef extends ClipBase {
   kind: "shot";
   src: string;
@@ -85,7 +87,7 @@ export interface Timeline { def: TrailerDef; clips: Clip[]; dur: number; frames:
 
 const TRAILER_OPTS = ["w", "h", "fps", "bpm", "beat0", "music", "letterbox", "fadeIn", "fadeOut", "grade"];
 const MUSIC_OPTS = ["src", "from", "vol", "fadeOut"];
-const CLIP_OPTS = ["dur", "beats", "in", "sfx", "overlay", "grade"];
+const CLIP_OPTS = ["dur", "beats", "in", "sfx", "overlay", "grade", "badge"];
 const OVERLAY_OPTS = ["src", "x", "y", "w", "h", "at", "dur", "opacity", "pixel"];
 const GRADE_OPTS = ["brightness", "contrast", "saturation", "gamma", "tint", "tintAmount", "vignette"];
 const DIRS: Dir[] = ["left", "right", "up", "down"];
@@ -94,7 +96,7 @@ const TITLE_OPTS = [...CLIP_OPTS, "sub", "size", "font", "weight", "color", "tra
 const MOVE_OPTS = ["zoom", "x", "y", "ease"];
 const TEXT_OPTS = ["text", "size", "font", "weight", "color", "tracking", "pos", "shadow"];
 const EASES: Ease[] = ["linear", "in", "out", "inOut"];
-const TRANS: TransType[] = ["cut", "fade", "dip", "flash", "wipe", "slide", "zoom"];
+export const TRANS: TransType[] = ["cut", "fade", "dip", "flash", "wipe", "slide", "zoom"];
 
 const isPlain = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isTrans = (v: unknown): v is Trans => isPlain(v) && v.__trans === true;
@@ -134,7 +136,7 @@ function trans(v: unknown): Trans {
   if (isTrans(v)) return v;
   throw new ReelError(`in: use a transition like "fade" or fade(0.5), dip(0.4, "#000"), flash(0.15), wipe(0.4), slide(0.4, "left"), zoom(0.5)`);
 }
-function makeTrans(type: TransType, dur?: unknown, c?: unknown): Trans {
+export function makeTrans(type: TransType, dur?: unknown, c?: unknown): Trans {
   const def = { cut: 0, fade: 0.5, dip: 0.6, flash: 0.25, wipe: 0.4, slide: 0.4, zoom: 0.5 }[type];
   const d = type === "cut" ? 0 : dur === undefined ? def : num(`${type}() duration`, dur, 0.01, 10);
   // slide's second argument is the direction the new clip comes from
@@ -235,6 +237,7 @@ export class Project {
       });
       return {
         label, loc, in: trans(o.in), sfx, overlays, grade: o.grade === undefined ? undefined : gradeOf("grade", o.grade),
+        badge: o.badge === undefined ? undefined : str("badge", o.badge),
         dur: o.dur === undefined ? undefined : num("dur", o.dur, 1e-3, 3600),
         beats: o.beats === undefined ? undefined : num("beats", o.beats, 0.125, 10000),
       };

@@ -203,6 +203,17 @@ function drawClip(dst: Img, tl: Timeline, src: Sources, c: Clip, u: number, alph
   if (d.grade) grade(dst, d.grade, clipX);
 }
 
+/** Corner badge: a grey plate with white text, top right, sized to the frame height. */
+const BADGE_STYLE: TextStyle = { size: 32, font: "sans-serif", weight: 700, color: "#ffffff", tracking: 0.02, pos: "center", shadow: false };
+function drawBadge(dst: Img, src: Sources, text: string, W: number, H: number, top: number, alpha = 1): void {
+  const size = Math.max(6, Math.round(H * 0.035)), pad = Math.max(2, Math.round(size * 0.45)), m = Math.max(2, Math.round(H * 0.03));
+  const im = src.text({ text, style: { ...BADGE_STYLE, size }, maxW: W * 0.3 });
+  const pw = Math.max(im.w + pad * 2, size * 2), ph = Math.max(im.h, size) + pad;
+  const x1 = W - m, x0 = Math.max(0, x1 - pw), y0 = top + m, y1 = Math.min(H, y0 + ph);
+  fill(dst, "#2a2a2a", alpha, Math.round(x0), Math.round(x1), Math.round(y0), Math.round(y1));
+  draw(dst, im, 1, Math.round((x0 + x1 - im.w) / 2), Math.round((y0 + y1 - im.h) / 2), alpha);
+}
+
 function drawTitle(dst: Img, tl: Timeline, src: Sources, c: Clip, d: TitleDef, u: number, alpha: number): void {
   const { w: W, h: H } = tl.def, p = u / c.dur;
   const fadeIn = d.anim === "punch" ? 1 : Math.min(1, u / TEXT_FADE), fadeOut = Math.min(1, (c.dur - u) / TEXT_FADE);
@@ -275,6 +286,8 @@ export function frameAt(tl: Timeline, t: number, src: Sources, dst = image(tl.de
     const bar = Math.max(0, (H - W / letterbox) / 2);
     if (bar > 0) { fill(dst, "#000000", 1, 0, W, 0, bar); fill(dst, "#000000", 1, 0, W, H - bar, H); }
   }
+  // The badge sits on top of everything (inside the letterbox) for the clip on screen.
+  if (c.def.badge) drawBadge(dst, src, c.def.badge, W, H, safe(tl).top);
   if (fadeIn > 0 && t < fadeIn) fill(dst, "#000000", 1 - t / fadeIn);
   if (fadeOut > 0 && t > tl.dur - fadeOut) fill(dst, "#000000", (t - (tl.dur - fadeOut)) / fadeOut);
   return dst;
