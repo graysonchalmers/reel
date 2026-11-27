@@ -4,6 +4,8 @@ Description=reel viewer (on demand) socket
 
 [Socket]
 ListenStream=18630
+# The socket starts the proxy (which pulls in reel), not the same-named reel-viewer.service.
+Service=reel-viewer-proxy.service
 
 [Install]
 WantedBy=sockets.target
