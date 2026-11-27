@@ -83,16 +83,15 @@ function follow() {
   if (t < view0 || t > view0 + visDur()) { view0 = t - visDur() * 0.1; clampView(); }
 }
 
-const thumbs = new Map();
+const thumbs = new Map(), byText = new Map();
 function thumb(tr, c) {
   const k = `${tr.name}|${state.version}|${c.n}`;
-  if (thumbsLocal) { for (const [kk, im] of thumbs) if (kk.startsWith(`${tr.name}|${state.version}|`) && im.dataset.text === c.text && im.complete && im.naturalWidth) return im; return null; }
+  if (thumbsLocal) return byText.get(`${tr.name}|${c.text}`) ?? null;
   let im = thumbs.get(k);
   if (!im) {
     if (thumbs.size > 200) thumbs.clear();
     im = new Image();
-    im.onload = () => draw();
-    im.dataset.text = c.text;
+    im.onload = () => { byText.set(`${tr.name}|${c.text}`, im); draw(); };
     im.src = `/api/frame?name=${encodeURIComponent(tr.name)}&t=${(c.start + c.dur * 0.5).toFixed(3)}&w=192&v=${state.version}`;
     thumbs.set(k, im);
   }

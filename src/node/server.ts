@@ -142,7 +142,7 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
       if (!tl || signal.aborted) continue;
       t.proxy = { state: "rendering", progress: 0, version };
       push();
-      const final = join(out, "_proxy", t.name + ".mp4"), tmp = final.replace(/\.mp4$/, ".part.mp4");
+      const final = join(out, "_proxy", t.name + ".mp4"), tmp = final.replace(/\.mp4$/, `.part-${version}.mp4`);
       let lastPush = 0;
       try {
         await renderMp4(tl, tmp, { scale: 0.5, preset: "ultrafast", crf: 26, signal, onProgress: (f, n) => {
