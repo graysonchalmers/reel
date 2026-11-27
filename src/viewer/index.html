@@ -50,6 +50,17 @@
   #clips button, #undo { min-width: 40px; min-height: 36px; background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 7px; font: 600 14px var(--mono); cursor: pointer; }
   #clips button:hover, #undo:hover { border-color: var(--accent); } #clips button:disabled, #undo:disabled { opacity: .35; }
   #clips button.del:hover { border-color: var(--bad); color: var(--bad); }
+  #clips li.trim { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; background: var(--panel2); }
+  #clips li.trim label { display: flex; gap: 6px; align-items: center; color: var(--dim); }
+  #clips li.trim input { width: 80px; min-height: 36px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: 14px var(--mono); padding: 4px 6px; }
+  #clips button.go { border-color: var(--accent); color: var(--accent); padding: 0 12px; }
+  #addbtn { min-height: 36px; margin-top: 8px; background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 7px; font: 600 13px var(--mono); padding: 0 14px; cursor: pointer; }
+  #picker { display: none; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; margin-top: 8px; }
+  #picker.open { display: grid; }
+  #picker figure { margin: 0; background: var(--panel2); border: 1px solid var(--line); border-radius: 7px; overflow: hidden; cursor: pointer; }
+  #picker figure:hover { border-color: var(--accent); }
+  #picker img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; display: block; background: #000; }
+  #picker figcaption { padding: 4px 6px; font: 11px var(--mono); color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #report { white-space: pre-wrap; overflow-wrap: anywhere; }
   /* Tablet / phone: the trailer list becomes a row of chips over the player. */
   @media (max-width: 900px) {
@@ -77,6 +88,9 @@
     <h3>clips <span class="grow"></span><button id="undo" title="undo last edit">↶ undo</button></h3>
     <div class="hint" id="edithint"></div>
     <ul id="clips"></ul>
+    <button id="addbtn">＋ add clip</button>
+    <div class="hint" id="pickhint"></div>
+    <div id="picker"></div>
   </div>
   <div id="notes">
     <h3>notes for Claude</h3>

@@ -113,7 +113,11 @@ export function fromOtio(o: J, loc?: string): TrailerDef {
 /** Edits the viewer can make to the master .otio: reorder or delete a clip (1-based, as shown).
  *  A clip moves with the transition into it. The new first clip loses its incoming transition
  *  (nothing to blend from) unless it is one reel allows on the first clip. */
-export type OtioEdit = { op: "move"; n: number; to: number } | { op: "delete"; n: number };
+export type OtioEdit = { op: "move"; n: number; to: number } | { op: "delete"; n: number }
+  /** Seconds: `from` = where in the source the clip starts (shots only), `dur` = clip length. */
+  | { op: "trim"; n: number; from?: number; dur?: number }
+  /** A new shot at position `at` (1-based; past the end appends). `src` is an absolute media path. */
+  | { op: "insert"; at: number; src: string; from?: number; dur: number };
 const FIRST_OK = ["cut", "flash", "dip", "slide", "zoom"];
 export function editOtio(o: J, e: OtioEdit): J {
   const out = structuredClone(o);
@@ -124,8 +128,36 @@ export function editOtio(o: J, e: OtioEdit): J {
   for (const it of video.children as J[]) {
     if (it.OTIO_SCHEMA?.startsWith("Clip")) { units.push([...pre, it]); pre = []; } else pre.push(it);
   }
+  const fps: number = out.metadata?.reel?.fps ?? 30;
+  const secs = (v: unknown, what: string, min: number) => {
+    if (typeof v !== "number" || !Number.isFinite(v) || v < min) throw new ReelError(`${what} must be a number >= ${min}`);
+    return v;
+  };
+  if (e.op === "insert") {
+    const dur = secs(e.dur, "dur", 1 / fps), from = e.from === undefined ? 0 : secs(e.from, "from", 0);
+    if (typeof e.src !== "string" || !e.src) throw new ReelError("insert needs a media file");
+    const clip = { OTIO_SCHEMA: "Clip.2", name: e.src.replace(/^.*[\\/]/, ""), metadata: { reel: { kind: "shot" } },
+      source_range: range(Math.round(from * fps), Math.max(1, Math.round(dur * fps)), fps),
+      media_references: { DEFAULT_MEDIA: { OTIO_SCHEMA: "ExternalReference.1", target_url: url(e.src), available_range: null, metadata: {} } },
+      active_media_reference_key: "DEFAULT_MEDIA" };
+    units.splice(Math.max(0, Math.min(units.length, Math.round(e.at) - 1)), 0, [clip]);
+    return finish(out, video, units);
+  }
   const n = e.n - 1;
   if (!(n >= 0 && n < units.length)) throw new ReelError(`no clip ${e.n} (there are ${units.length})`);
+  if (e.op === "trim") {
+    const u = units[n], clip = u[u.length - 1];
+    const isTitle = clip.metadata?.reel?.kind === "title";
+    const sr = clip.source_range ?? range(0, Math.round((clip.metadata?.reel?.dur ?? 3) * fps), fps);
+    if (e.from !== undefined) {
+      if (isTitle) throw new ReelError("a title has no source to trim from; change its length instead");
+      sr.start_time = rt(Math.round(secs(e.from, "from", 0) * sr.start_time.rate), sr.start_time.rate);
+    }
+    if (e.dur !== undefined) sr.duration = rt(Math.max(1, Math.round(secs(e.dur, "dur", 1 / fps) * sr.duration.rate)), sr.duration.rate);
+    clip.source_range = sr;
+    if (isTitle && clip.media_references?.DEFAULT_MEDIA?.available_range) clip.media_references.DEFAULT_MEDIA.available_range = range(0, sr.duration.value, sr.duration.rate);
+    return finish(out, video, units);
+  }
   if (e.op === "delete") {
     if (units.length === 1) throw new ReelError("can't delete the last clip");
     units.splice(n, 1);
@@ -134,6 +166,9 @@ export function editOtio(o: J, e: OtioEdit): J {
     const [u] = units.splice(n, 1);
     units.splice(to, 0, u);
   }
+  return finish(out, video, units);
+}
+function finish(out: J, video: J, units: J[][]): J {
   // Only the first unit's leading transition needs fixing; others keep theirs.
   const first = units[0], clip = first[first.length - 1];
   const tr = first.find((x) => x.OTIO_SCHEMA?.startsWith("Transition"));

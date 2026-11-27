@@ -1,6 +1,7 @@
 // Live viewer server: watch the trailer file, rebuild timelines and reports on save, render a
 // half-size proxy MP4 in the background, push state over SSE, serve frames, proxies and feedback.
 import { createReadStream, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { createServer, type ServerResponse } from "node:http";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,13 +18,13 @@ import { renderMp4 } from "./render.ts";
 import { clipText, report } from "./report.ts";
 
 export interface ServeOptions {
-  host?: string; port?: number; out?: string; log?: (line: string) => void }
+  host?: string; media?: string[]; port?: number; out?: string; log?: (line: string) => void }
 
 interface ErrInfo { message: string; loc?: string }
 interface Proxy { state: "waiting" | "rendering" | "ready" | "failed"; progress: number; version: number; error?: string }
 interface TrailerInfo {
   name: string; w: number; h: number; fps: number; dur: number; bpm?: number; beat0: number;
-  clips: { n: number; start: number; dur: number; kind: string; text: string; loc?: string; in: string; inDur: number }[];
+  clips: { n: number; start: number; dur: number; kind: string; text: string; loc?: string; in: string; inDur: number; from?: number }[];
   report: string; music?: { hop: number; db: number[]; hits: number[] }; proxy: Proxy; error?: ErrInfo;
 }
 interface State { version: number; file: string; editable: boolean; undo: number; time: string; ms: number; error?: ErrInfo; trailers: TrailerInfo[] }
@@ -41,6 +42,18 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
   const editable = /\.otio$/i.test(abs);
   const histDir = join(out, "_history", basename(abs));
   const undoCount = () => { try { return readdirSync(histDir).filter((f) => f.endsWith(".otio")).length; } catch { return 0; } };
+  // Folders the "add clip" picker offers: --media dirs, else next to the edit and ../media.
+  const mediaDirs = (opts.media?.length ? opts.media.map((d) => resolve(d)) : [dirname(abs), resolve(dirname(abs), "media"), resolve(dirname(abs), ".."), resolve(dirname(abs), "..", "media")]);
+  const MEDIA_RE = /\.(mp4|mov|webm|mkv|gif|png|jpe?g)$/i;
+  const listMedia = () => {
+    const files: { name: string; path: string; dir: string }[] = [];
+    for (const d of [...new Set(mediaDirs)]) {
+      let names: string[] = [];
+      try { names = readdirSync(d); } catch { continue; }
+      for (const n of names.sort()) if (MEDIA_RE.test(n) && !n.startsWith(".")) files.push({ name: n, path: join(d, n), dir: basename(d) });
+    }
+    return files;
+  };
   let state: State = { version: 0, editable, undo: 0, file: basename(abs), time: "", ms: 0, trailers: [] };
   let watched = new Set<string>();
   let timer: NodeJS.Timeout | undefined;
@@ -92,7 +105,7 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
           nextTl.set(name, tl);
           Object.assign(info, {
             dur: tl.dur, report: r.text,
-            clips: tl.clips.map((c) => ({ n: c.i + 1, start: c.start, dur: c.dur, kind: c.def.kind, text: clipText(c), loc: c.def.loc, in: c.def.in.type, inDur: c.def.in.dur })),
+            clips: tl.clips.map((c) => ({ n: c.i + 1, start: c.start, dur: c.dur, kind: c.def.kind, text: clipText(c), loc: c.def.loc, in: c.def.in.type, inDur: c.def.in.dur, from: c.def.kind === "shot" ? c.def.from : undefined })),
             music: r.music && { hop: r.music.hop, db: r.music.db, hits: r.music.hits.map((h) => h.t) },
           });
         } catch (e) {
@@ -161,6 +174,17 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
           res.writeHead(200, { "content-type": "video/mp4", "accept-ranges": "bytes", "content-length": size, "cache-control": "no-store" });
           createReadStream(path).pipe(res);
         }
+      } else if (url.pathname === "/api/media") {
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify(listMedia().map(({ name, dir }) => ({ name, dir }))));
+      } else if (url.pathname === "/api/thumb") {
+        // A small still from a media file for the picker (first frame, 1 s in for video).
+        const f = listMedia().find((m) => m.name === url.searchParams.get("f") && m.dir === url.searchParams.get("d"));
+        if (!f) { res.writeHead(404); res.end(); return; }
+        const r = spawnSync("ffmpeg", ["-v", "error", ...(/\.(png|jpe?g)$/i.test(f.name) ? [] : ["-ss", "1"]), "-i", f.path, "-frames:v", "1", "-vf", "scale=240:-2", "-f", "image2", "-c:v", "mjpeg", "-"], { maxBuffer: 8 << 20 });
+        if (r.status !== 0 || !r.stdout.length) { res.writeHead(404); res.end(); return; }
+        res.writeHead(200, { "content-type": "image/jpeg", "cache-control": "max-age=300" });
+        res.end(r.stdout);
       } else if ((url.pathname === "/api/edit" || url.pathname === "/api/undo") && req.method === "POST") {
         // Edits write the master .otio (old copy kept in out/_history for undo); the watcher rebuilds.
         const chunks: Buffer[] = [];
@@ -175,7 +199,13 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
               renameSync(join(histDir, last), abs);
               log(`[reel] undo -> ${last}`);
             } else {
-              const e = JSON.parse(Buffer.concat(chunks).toString("utf8")) as OtioEdit;
+              const e = JSON.parse(Buffer.concat(chunks).toString("utf8")) as OtioEdit & { file?: string; dir?: string };
+              if (e.op === "insert") {
+                // Only files the picker offers can be added.
+                const f = listMedia().find((m) => m.name === e.file && m.dir === e.dir);
+                if (!f) throw new Error(`no media file '${e.file}'`);
+                e.src = f.path;
+              }
               const cur = readFileSync(abs, "utf8");
               const next = editOtio(JSON.parse(cur), e);
               mkdirSync(histDir, { recursive: true });

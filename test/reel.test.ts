@@ -235,3 +235,16 @@ test("otio edits: move and delete clips, the first clip never fades in from noth
   const p = new Project(); const d = fromOtio(editOtio(o, { op: "move", n: 3, to: 1 })); p.trailers.set("t", d); p.order.push("t");
   assert.equal(p.timeline("t").frames, 90);
 });
+
+test("otio edits: trim a shot and a title, insert a shot", async () => {
+  const { toOtio, fromOtio, editOtio } = await import("../src/core/otio.ts");
+  const a = loadSource(`trailer("t", { w: 64, h: 36, fps: 30 }, shot("bg.mp4", { dur: 1 }), title("A", { dur: 1 }))`, "t.rx.js", dir).timeline("t");
+  let o = toOtio(a);
+  o = editOtio(o, { op: "trim", n: 1, from: 0.5, dur: 1.5 });
+  o = editOtio(o, { op: "trim", n: 2, dur: 0.4 });
+  assert.throws(() => editOtio(o, { op: "trim", n: 2, from: 1 }), /title/);
+  o = editOtio(o, { op: "insert", at: 2, src: join(dir, "red.png"), dur: 2 });
+  const d = fromOtio(o);
+  assert.deepEqual(d.clips.map((c: any) => [c.kind, c.dur, c.kind === "shot" ? c.from : null]), [["shot", 1.5, 0.5], ["shot", 2, 0], ["title", 0.4, null]]);
+  assert.equal((d.clips[1] as any).src, join(dir, "red.png"));
+});
