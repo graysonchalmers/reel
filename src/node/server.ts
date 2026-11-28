@@ -1,11 +1,28 @@
 // Live viewer server: watch the trailer file, rebuild timelines and reports on save, render a
 // half-size proxy MP4 in the background, push state over SSE, serve frames, proxies and feedback.
-import { createReadStream, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { Resvg } from "@resvg/resvg-js";
 import { createServer, type ServerResponse } from "node:http";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// ffmpeg single-frame grabs for the trim filmstrip: at most 4 at a time, never blocking the event loop
+const frameCache = new Map<string, Promise<Buffer | undefined>>();
+let grabbing = 0;
+const grabQueue: (() => void)[] = [];
+function grabFrame(args: string[]): Promise<Buffer | undefined> {
+  return new Promise((done) => {
+    const run = () => {
+      grabbing++;
+      const p = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "ignore"] }), parts: Buffer[] = [];
+      p.stdout.on("data", (b: Buffer) => parts.push(b));
+      p.on("error", () => {});
+      p.on("close", (code) => { grabbing--; grabQueue.shift()?.(); const b = Buffer.concat(parts); done(code === 0 && b.length ? b : undefined); });
+    };
+    if (grabbing < 4) run(); else grabQueue.push(run);
+  });
+}
 import { deflateSync } from "node:zlib";
 import { frameAt, scaled } from "../core/compose.ts";
 import { type ReelError, wrap } from "../core/errors.ts";
@@ -23,7 +40,9 @@ export interface ServeOptions {
   /** Shell command run after a full render to publish it; `{file}` is replaced by the quoted MP4 path.
    *  A `GALLERY: <url>` line (else the first URL) becomes the link in
    *  the viewer, and a `VIDEO: <url>` line a direct link to the published MP4. Default: env REEL_PUBLISH. */
-  publish?: string }
+  publish?: string
+  /** Largest upload accepted by /api/upload, in bytes (default 2 GB). */
+  uploadCap?: number }
 
 /** The app icon: a grey plate with an amber reel. */
 const ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#222222"/><circle cx="256" cy="256" r="150" fill="none" stroke="#ffb454" stroke-width="40"/><circle cx="256" cy="256" r="40" fill="#ffb454"/><g fill="#ffb454"><circle cx="256" cy="166" r="28"/><circle cx="256" cy="346" r="28"/><circle cx="166" cy="256" r="28"/><circle cx="346" cy="256" r="28"/></g></svg>`;
@@ -37,7 +56,7 @@ interface ErrInfo { message: string; loc?: string }
 interface Proxy { state: "waiting" | "rendering" | "ready" | "failed"; progress: number; version: number; error?: string }
 interface TrailerInfo {
   name: string; w: number; h: number; fps: number; dur: number; bpm?: number; beat0: number;
-  clips: { srcDur?: number; speed?: number; n: number; start: number; dur: number; kind: string; text: string; loc?: string; in: string; inDur: number; inDir?: string; from?: number; title?: string; sub?: string; badge?: string }[];
+  clips: { motion?: string; move?: unknown; srcW?: number; srcH?: number; srcDur?: number; speed?: number; n: number; start: number; dur: number; kind: string; text: string; loc?: string; in: string; inDur: number; inDir?: string; from?: number; title?: string; sub?: string; badge?: string }[];
   musicSrc?: string; musicVol?: number;
   report: string; music?: { hop: number; db: number[]; hits: number[] }; proxy: Proxy; error?: ErrInfo;
 }
@@ -64,7 +83,12 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
   const stamp = () => `${Date.now()}-${String(seq++ % 1000).padStart(3, "0")}.otio`;
   // Folders the "add clip" picker offers: --media dirs, else next to the edit and ../media.
   const mediaDirs = (opts.media?.length ? opts.media.map((d) => resolve(d)) : [dirname(abs), resolve(dirname(abs), "media"), resolve(dirname(abs), ".."), resolve(dirname(abs), "..", "media")]);
-  const MEDIA_RE = /\.(mp4|mov|webm|mkv|gif|png|jpe?g|wav|mp3|ogg|m4a|flac)$/i, AUDIO_RE = /\.(wav|mp3|ogg|m4a|flac)$/i;
+  // Uploads land in the edit's media/uploads/ (media/ next to the edit, else ../media).
+  const mediaHome = [resolve(dirname(abs), "media"), resolve(dirname(abs), "..", "media")].find((d) => existsSync(d)) ?? resolve(dirname(abs), "media");
+  const uploadDir = join(mediaHome, "uploads");
+  mediaDirs.push(uploadDir);
+  const uploadCap = opts.uploadCap ?? 2 * 1024 ** 3;
+  const MEDIA_RE = /\.(mp4|mov|webm|mkv|gif|png|jpe?g|webp|wav|mp3|ogg|m4a|flac)$/i, AUDIO_RE = /\.(wav|mp3|ogg|m4a|flac)$/i;
   const listMedia = () => {
     const files: { name: string; path: string; dir: string }[] = [];
     for (const d of [...new Set(mediaDirs)]) {
@@ -79,6 +103,7 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
   let timer: NodeJS.Timeout | undefined;
   let abort: AbortController | undefined;
   const frameSources = new Map<string, FrameSource>();
+  const srcSize = (p: string) => { try { const q = probe(p); return { srcW: q.w, srcH: q.h }; } catch { return {}; } };
   const srcDur = (p: string) => { try { return probe(p).dur; } catch { return undefined; } };
   const sendFile = (req: { headers: { range?: string } }, res: ServerResponse, path: string, type: string) => {
     const size = statSync(path).size, m = /bytes=(\d*)-(\d*)/.exec(req.headers.range ?? "");
@@ -177,7 +202,8 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
             dur: tl.dur, report: r.text,
             clips: tl.clips.map((c) => ({ n: c.i + 1, start: c.start, dur: c.dur, kind: c.def.kind, text: clipText(c), loc: c.def.loc, in: c.def.in.type, inDur: c.def.in.dur, inDir: c.def.in.dir,
               from: c.def.kind === "shot" ? c.def.from : undefined, speed: c.def.kind === "shot" ? c.def.speed : undefined,
-              srcDur: c.def.kind === "shot" ? srcDur(c.def.src) : undefined, title: c.def.kind === "title" ? c.def.text : undefined, sub: c.def.kind === "title" ? c.def.sub : undefined, badge: c.def.badge })),
+              srcDur: c.def.kind === "shot" ? srcDur(c.def.src) : undefined,
+              ...(c.def.kind === "shot" ? { motion: c.def.motion, move: c.def.move, ...srcSize(c.def.src) } : {}), title: c.def.kind === "title" ? c.def.text : undefined, sub: c.def.kind === "title" ? c.def.sub : undefined, badge: c.def.badge })),
             musicSrc: def.music ? basename(def.music.src) : undefined, musicVol: def.music?.vol,
             music: r.music && { hop: r.music.hop, db: r.music.db, hits: r.music.hits.map((h) => h.t) },
           });
@@ -258,17 +284,55 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
         const tl = timelines.get(name), c = tl?.clips[Number(url.searchParams.get("n")) - 1];
         if (!c || c.def.kind !== "shot") { res.writeHead(404); res.end(); return; }
         const w = Math.max(32, Math.min(480, Number(url.searchParams.get("w")) || 160)), ts = Math.max(0, Number(url.searchParams.get("t")) || 0);
-        const still = /\.(png|jpe?g)$/i.test(c.def.src);
-        const r = spawnSync("ffmpeg", ["-v", "error", ...(still ? [] : ["-ss", ts.toFixed(3)]), "-i", c.def.src, "-frames:v", "1", "-vf", `scale=${w}:-2`, "-f", "image2", "-c:v", "mjpeg", "-"], { maxBuffer: 8 << 20 });
-        if (r.status !== 0 || !r.stdout.length) { res.writeHead(404); res.end(); return; }
-        res.writeHead(200, { "content-type": "image/jpeg", "cache-control": "max-age=600" });
-        res.end(r.stdout);
+        const still = /\.(png|jpe?g|webp)$/i.test(c.def.src);
+        // async + cached: a zoomed filmstrip asks for a dozen frames at once and must not stall the server
+        const key = `${c.def.src}|${still ? 0 : ts.toFixed(2)}|${w}`;
+        let job = frameCache.get(key);
+        if (!job) {
+          job = grabFrame(["-v", "error", ...(still ? [] : ["-ss", ts.toFixed(3)]), "-i", c.def.src, "-frames:v", "1", "-vf", `scale=${w}:-2`, "-f", "image2", "-c:v", "mjpeg", "-"]);
+          frameCache.set(key, job);
+          if (frameCache.size > 400) frameCache.delete(frameCache.keys().next().value!);
+        }
+        void job.then((jpg) => {
+          if (!jpg) { frameCache.delete(key); res.writeHead(404); res.end(); return; }
+          res.writeHead(200, { "content-type": "image/jpeg", "cache-control": "max-age=600" });
+          res.end(jpg);
+        });
       } else if (url.pathname === "/api/full") {
         const f = basename(url.searchParams.get("f") ?? "");
         if (!/\.mp4$/.test(f)) { res.writeHead(404); res.end(); return; }
         try { statSync(join(out, "_full", f)); } catch { res.writeHead(404); res.end(); return; }
         res.setHeader("content-disposition", `attachment; filename="${f}"`);
         sendFile(req, res, join(out, "_full", f), "video/mp4");
+      } else if (url.pathname === "/api/upload" && req.method === "POST") {
+        // A file dropped on (or picked in) the viewer, streamed to disk: media/uploads/<safe unique name>.
+        const reply = (code: number, j: unknown) => { if (!res.headersSent) { res.writeHead(code, { "content-type": "application/json", connection: "close" }); res.end(JSON.stringify(j)); } };
+        const raw = basename(url.searchParams.get("f") ?? "");
+        const ext = /\.([a-z0-9]+)$/i.exec(raw)?.[1]?.toLowerCase() ?? "";
+        if (!editable) { req.resume(); return reply(409, { error: "uploads need an editable .otio" }); }
+        if (!MEDIA_RE.test("x." + ext)) { req.resume(); return reply(415, { error: `only video, image and audio files (got '.${ext || "?"}')` }); }
+        const len = Number(req.headers["content-length"] ?? NaN);
+        if (len > uploadCap) { req.resume(); return reply(413, { error: `file is over the ${Math.round(uploadCap / 1024 ** 2)} MB limit` }); }
+        const stem = raw.slice(0, -(ext.length + 1)).normalize("NFKD").replace(/[^\w.-]+/g, "-").replace(/^[-.]+|-+$/g, "").slice(0, 80) || "upload";
+        mkdirSync(uploadDir, { recursive: true });
+        let name = `${stem}.${ext}`;
+        for (let k = 1; existsSync(join(uploadDir, name)) || existsSync(join(uploadDir, name + ".part")); k++) name = `${stem}-${k}.${ext}`;
+        const final = join(uploadDir, name), part = final + ".part";
+        const ws = createWriteStream(part, { flags: "wx" });
+        let got = 0, failed = false;
+        const fail = (code: number, msg: string) => { if (failed) return; failed = true; ws.destroy(); try { rmSync(part, { force: true }); } catch {} reply(code, { error: msg }); };
+        req.on("data", (d: Buffer) => { got += d.length; if (got > uploadCap) { fail(413, "file is over the upload limit"); req.destroy(); } });
+        req.on("aborted", () => fail(400, "upload aborted"));
+        ws.on("error", (e) => fail(500, e.message));
+        ws.on("finish", () => {
+          if (failed) return;
+          if (!got) { try { rmSync(part, { force: true }); } catch {} return reply(400, { error: "empty upload" }); }
+          if (existsSync(final)) return fail(409, "a file with that name appeared meanwhile");
+          try { renameSync(part, final); } catch (e) { return fail(500, (e as Error).message); }
+          log(`[reel] upload ${name} (${(got / 1024 ** 2).toFixed(1)} MB)`);
+          reply(200, { ok: true, name, dir: basename(uploadDir), bytes: got });
+        });
+        req.pipe(ws);
       } else if (url.pathname === "/api/render" && req.method === "POST") {
         const reply = (code: number, j: unknown) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(j)); };
         if (state.full && (state.full.state === "rendering" || state.full.state === "publishing")) return reply(409, { error: "a full render is already running" });
@@ -282,8 +346,8 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
         // A small still from a media file for the picker (first frame, 1 s in for video).
         const f = listMedia().find((m) => m.name === url.searchParams.get("f") && m.dir === url.searchParams.get("d"));
         if (!f) { res.writeHead(404); res.end(); return; }
-        const d = /\.(png|jpe?g)$/i.test(f.name) ? undefined : srcDur(f.path);
-        const r = spawnSync("ffmpeg", ["-v", "error", ...(/\.(png|jpe?g)$/i.test(f.name) ? [] : ["-ss", (d ? d * 0.4 : 1).toFixed(2)]), "-i", f.path, "-frames:v", "1", "-vf", "scale=240:-2", "-f", "image2", "-c:v", "mjpeg", "-"], { maxBuffer: 8 << 20 });
+        const d = /\.(png|jpe?g|webp)$/i.test(f.name) ? undefined : srcDur(f.path);
+        const r = spawnSync("ffmpeg", ["-v", "error", ...(/\.(png|jpe?g|webp)$/i.test(f.name) ? [] : ["-ss", (d ? d * 0.4 : 1).toFixed(2)]), "-i", f.path, "-frames:v", "1", "-vf", "scale=240:-2", "-f", "image2", "-c:v", "mjpeg", "-"], { maxBuffer: 8 << 20 });
         if (r.status !== 0 || !r.stdout.length) { res.writeHead(404); res.end(); return; }
         res.writeHead(200, { "content-type": "image/jpeg", "cache-control": "max-age=300" });
         res.end(r.stdout);

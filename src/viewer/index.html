@@ -96,6 +96,7 @@
   .step button { border: 0; border-radius: 0; min-width: 40px; background: var(--panel2); font-size: 16px; }
   .step input { width: 64px; min-height: 40px; border: 0; border-left: 1px solid var(--line); border-right: 1px solid var(--line); background: var(--bg); color: var(--text); font: 14px var(--mono); text-align: center; }
   .strip { position: relative; height: 56px; width: 100%; background: #000; border-radius: 6px; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; margin: 4px 0 8px; }
+  .strip .frames { position: absolute; inset: 0; }
   .strip img { position: absolute; top: 0; height: 100%; object-fit: cover; opacity: .45; }
   .strip .selr { position: absolute; top: 0; bottom: 0; border-top: 2px solid var(--accent); border-bottom: 2px solid var(--accent); cursor: grab; }
   .strip .selr img { opacity: 1; }
@@ -114,6 +115,22 @@
   #addprev video, #addprev img { max-height: 24dvh; width: 100%; aspect-ratio: 16 / 9; object-fit: contain; background: #000; border-radius: 6px; display: block; }
   #addprev .rowf { margin-top: 6px; }
   #picker figure.on { border-color: var(--accent); }
+  .ghost { position: fixed; z-index: 40; pointer-events: none; display: flex; gap: 8px; align-items: center; padding: 4px 8px 4px 4px; background: #2c2c2c; border: 1px solid var(--accent); border-radius: 8px; font: 11px var(--mono); box-shadow: 0 8px 20px #000a; }
+  .ghost img { width: 64px; height: 36px; object-fit: cover; border-radius: 4px; }
+  body.bindrag #addsheet { opacity: .12; pointer-events: none; }
+  body.bindrag, body.bindrag * { cursor: grabbing !important; user-select: none; -webkit-user-select: none; }
+  #picker figure { touch-action: pan-y; -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; }
+  body.filedrop #tlwrap { outline: 2px dashed var(--accent); outline-offset: -4px; }
+  body.filedrop::after { content: "drop files to upload and insert (on the timeline: at that spot)"; position: fixed; left: 50%; top: 60px; transform: translateX(-50%); z-index: 45; padding: 8px 14px; background: #2c2c2c; border: 1px solid var(--accent); border-radius: 9px; font: 12px var(--mono); pointer-events: none; }
+  .kb { position: relative; width: 100%; background: #000; border-radius: 6px; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; margin-bottom: 8px; }
+  .kb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; opacity: .75; }
+  .kbr { position: absolute; border: 2px dashed #d0d0d0; box-shadow: 0 0 0 1px #000a; cursor: move; }
+  .kbr.end { border: 2px solid var(--accent); }
+  .kbr.end span { top: auto; bottom: 2px; }
+  .kbr span { position: absolute; left: 4px; top: 2px; font: 600 11px var(--mono); color: #fff; text-shadow: 0 1px 2px #000; }
+  .kbr i { position: absolute; right: -20px; bottom: -20px; width: 40px; height: 40px; cursor: nwse-resize; display: flex; align-items: center; justify-content: center; }
+  .kbr i::after { content: ""; width: 12px; height: 12px; background: #d0d0d0; border-radius: 2px; }
+  .kbr.end i::after { background: var(--accent); }
   #report { font: 11.5px/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dim); }
   /* Long-press / right-click menu on a timeline clip. */
   #menu { display: none; position: fixed; z-index: 20; min-width: 200px; background: #262626; border: 1px solid #4a4a4a; border-radius: 9px; padding: 5px; box-shadow: 0 10px 30px #000a; }
@@ -211,7 +228,7 @@
 <div id="menu" role="menu"></div>
 <div id="addsheet">
   <div id="addbox">
-    <div class="addhead"><h3>add a clip</h3><span class="grow"></span><button id="addclose" title="Close the add-clip picker">✕</button></div>
+    <div class="addhead"><h3>add a clip</h3><span class="grow"></span><button id="uploadbtn" title="Upload video, images or audio from this device into the edit's media/uploads folder (or drop files anywhere on the page)">⇪ upload</button><input type="file" id="upfile" multiple accept="video/*,image/*,audio/*,.mkv,.webp" hidden title="Files to upload"><button id="addclose" title="Close the add-clip picker">✕</button></div>
     <input type="text" id="addq" placeholder="search media" title="Filter the media files by name" autocomplete="off">
     <div class="seg" id="addfolders"></div>
     <div id="addprev"><div class="hint" id="pickhint">Tap a file to preview it.</div></div>

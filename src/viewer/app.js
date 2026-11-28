@@ -157,6 +157,7 @@ function draw() {
     if (drag?.kind === "trim" && drag.c.n === c.n) { g.fillStyle = "#ffb454"; g.fillText(`${(s1 - s0).toFixed(2)}s`, Math.max(4, x0 + 4), CY + ch - 6); }
   }
   // dragged clip follows the pointer; amber line where it lands
+  if (dropTo) { const lx = xOf(dropTo - 1 < tr.clips.length ? tr.clips[dropTo - 1].start : tr.dur); g.fillStyle = "#ffb454"; g.fillRect(lx - 2, CY - 8, 4, ch + 14); g.fillText(dropLabel, Math.min(w - 120, lx + 6), CY - 1); }
   if (drag?.kind === "move" && drag.on) {
     const c = drag.c, x0 = drag.x - drag.grabDx, x1 = x0 + c.dur * pps();
     g.save(); g.globalAlpha = 0.85; block(x0, x1, CY - 4, ch, 5); g.fillStyle = "#4a4a4a"; g.fill();
@@ -196,7 +197,14 @@ function slotTime(to) {
 }
 
 // ---------------------------------------------------------------- timeline: pointer editing
-let drag, press;
+let drag, press, dropTo = 0, dropLabel = "";
+/** Insert slot (1-based) for a page x over the timeline, or 0 when not over it. */
+function slotAt(clientX, clientY) {
+  const r = cv.getBoundingClientRect(), tr = cur();
+  if (!tr?.dur || clientX < r.left || clientX > r.right || clientY < r.top - 20 || clientY > r.bottom + 10) return 0;
+  const s = tOf(clientX - r.left);
+  return tr.clips.filter((c) => c.start + c.dur / 2 < s).length + 1;
+}
 const pointers = new Map();
 let pinch;
 function hit(x, y, touch) {
@@ -304,6 +312,7 @@ cv.addEventListener("wheel", (e) => {
   else if (zoom > 1) { e.preventDefault(); view0 += ((Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY) / pps()); clampView(); draw(); }
 }, { passive: false });
 addEventListener("resize", () => { placeMedia(); draw(); });
+if (window.ResizeObserver) new ResizeObserver(() => draw()).observe(cv);   // panel and sheet changes resize the canvas without a window resize
 
 // ---------------------------------------------------------------- clip menu (right-click / long-press)
 const menu = $("menu");
@@ -445,6 +454,7 @@ $("grab").addEventListener("pointerup", (e) => {
 
 // ---------------------------------------------------------------- edits, undo/redo, toast
 const opText = (b) => ({
+  motion: `clip ${b.n} motion: ${b.motion}`,
   title: `clip ${b.n} title edited`, trans: `clip ${b.n} transition: ${b.type}`, music: "music changed", badge: `clip ${b.n} badge`,
   move: `clip ${b.n} moved to ${b.to}`, delete: `clip ${b.n} deleted`, trim: `clip ${b.n} trimmed`,
   duplicate: `clip ${b.n} duplicated`, split: `clip ${b.n} split`, insert: `clip added at ${b.at}`,
@@ -490,7 +500,7 @@ function local(body) {
 let thumbsLocal = false;
 function chip() {
   const tr = cur(), p = tr?.proxy, el = $("rchip");
-  const txt = pending ? "saving edit…" : p?.state === "rendering" ? `rendering ${Math.round(p.progress * 100)}%` : p?.state === "waiting" ? "rendering…" : "";
+  const txt = uploading ? uploading : pending ? "saving edit…" : p?.state === "rendering" ? `rendering ${Math.round(p.progress * 100)}%` : p?.state === "waiting" ? "rendering…" : "";
   el.textContent = txt; el.classList.toggle("on", !!txt);
 }
 async function edit(body, msg) {
@@ -539,7 +549,7 @@ function renderClips() {
       row.className = "trim";
       const shot = c.kind === "shot";
       const strip = shot && c.srcDur > 0;
-      row.innerHTML = (strip ? `<div style="width:100%"><div class="strip" id="strip" title="Source filmstrip: drag the amber handles to set the in and out points, or drag the lit part to slide the clip through its source"></div><div class="striplbl"><span>0s</span><span id="striptxt"></span><span>${c.srcDur.toFixed(1)}s</span></div></div>` : "") +
+      row.innerHTML = (strip ? `<div style="width:100%"><div class="strip" id="strip" title="Source filmstrip: drag the amber handles to set the in and out points, or drag the lit part to slide the clip through its source"></div><div class="striplbl"><span id="stripv0">0s</span><span id="striptxt"></span><span id="stripv1">${c.srcDur.toFixed(1)}s</span></div><div class="rowf" style="align-items:center"><button type="button" id="stripout" title="Zoom the filmstrip out to see more of the source (Ctrl-wheel or pinch on the strip also zoom)">−</button><span class="hint" id="stripzoom" title="How far the filmstrip is zoomed into the source"></span><button type="button" id="stripin" title="Zoom the filmstrip in around the clip for finer handle steps">＋</button></div></div>` : "") +
         (shot ? `<label title="Where in the source media this clip starts">start ${stepper("tr-from", c.from ?? 0, 0.1, 0, "start in source")}</label>` : "") +
         `<label title="How long the clip plays">length ${stepper("tr-dur", c.dur, 0.1, 1 / (tr.fps || 30), "clip length")}</label><button class="primary" title="Save this trim">apply</button>`;
       row.querySelector("button.primary").onclick = () => {
@@ -568,38 +578,67 @@ function wireSteppers(root) {
   };
 }
 // ---------------------------------------------------------------- trim filmstrip
+// The strip shows a window [v0, v0 + span] of the source. It starts zoomed around the clip's range
+// (so long sources give fine handle steps); −/＋, Ctrl-wheel and pinch zoom it, around the clip.
+let stripZoom = {};   // span per clip, so a rebuild of the clip list keeps the filmstrip zoom
 function filmstrip(c) {
   const el = $("strip"); if (!el) return;
-  const W = el.clientWidth, n = Math.max(4, Math.round(W / 80)), D = c.srcDur, sp = c.speed ?? 1, fps = cur().fps || 30;
-  const frames = [];
-  for (let k = 0; k < n; k++) frames.push(`<img alt="" draggable="false" src="/api/srcframe?name=${encodeURIComponent(sel)}&n=${c.n}&t=${((k + 0.5) * D / n).toFixed(2)}&w=160" style="left:${(k / n) * 100}%;width:${100 / n + 0.2}%">`);
-  el.innerHTML = frames.join("") + `<div class="selr"></div><div class="hdl" data-h="in" title="In point: drag to change where the clip starts in its source"></div><div class="hdl" data-h="out" title="Out point: drag to change where the clip ends"></div>`;
-  const selr = el.querySelector(".selr"), [hin, hout] = el.querySelectorAll(".hdl");
+  const W = el.clientWidth, D = c.srcDur, sp = c.speed ?? 1, fps = cur().fps || 30, n = Math.max(4, Math.round(W / 80));
   let from = Number($("tr-from").value), len = Number($("tr-dur").value) * sp;
-  const px = (s) => (s / D) * W;
+  const zkey = `${sel}|${c.n}|${c.text}`;
+  let span = stripZoom[zkey] ?? Math.min(D, Math.max(2, len * 3)), v0 = 0;
+  const centre = () => { v0 = Math.max(0, Math.min(D - span, from + len / 2 - span / 2)); };
+  centre();
+  el.innerHTML = `<div class="frames"></div><div class="selr"></div><div class="hdl" data-h="in" title="In point: drag to change where the clip starts in its source"></div><div class="hdl" data-h="out" title="Out point: drag to change where the clip ends"></div>`;
+  const fr = el.querySelector(".frames"), selr = el.querySelector(".selr"), [hin, hout] = el.querySelectorAll(".hdl");
+  let lastKey = "";
+  const frames = () => {
+    // frames on a grid of the window, so small pans reuse cached images
+    const step = span / n, key = `${v0.toFixed(2)}|${span.toFixed(3)}`;
+    if (key === lastKey) return; lastKey = key;
+    const k0 = Math.floor(v0 / step), out = [];
+    for (let k = k0; k * step < v0 + span; k++) {
+      const ts = Math.min(D - 0.01, (k + 0.5) * step);
+      out.push(`<img alt="" draggable="false" src="/api/srcframe?name=${encodeURIComponent(sel)}&n=${c.n}&t=${ts.toFixed(2)}&w=160" style="left:${((k * step - v0) / span) * 100}%;width:${(step / span) * 100 + 0.3}%">`);
+    }
+    fr.innerHTML = out.join("");
+  };
+  const px = (s) => ((s - v0) / span) * W;
   const paint = () => {
-    selr.style.left = px(from) + "px"; selr.style.width = Math.max(2, px(len)) + "px";
+    frames();
+    selr.style.left = px(from) + "px"; selr.style.width = Math.max(2, px(from + len) - px(from)) + "px";
     hin.style.left = px(from) + "px"; hout.style.left = px(from + len) + "px";
     $("striptxt").textContent = `${from.toFixed(2)}–${(from + len).toFixed(2)}s`;
+    $("stripv0").textContent = `${v0.toFixed(1)}s`; $("stripv1").textContent = `${(v0 + span).toFixed(1)}s`;
+    stripZoom = { [zkey]: span };
+    $("stripzoom").textContent = `${(D / span).toFixed(D / span < 10 ? 1 : 0)}×`;
   };
+  const zoomBy = (f) => { span = Math.max(Math.min(D, 0.5), Math.min(D, span / f)); centre(); paint(); };
+  $("stripin").onclick = () => zoomBy(2);
+  $("stripout").onclick = () => zoomBy(0.5);
   const sync = () => { $("tr-from").value = from.toFixed(2); $("tr-dur").value = (len / sp).toFixed(2); paint(); };
-  $("tr-from").oninput = () => { from = Math.max(0, Math.min(D - 1 / fps, Number($("tr-from").value) || 0)); paint(); };
-  $("tr-dur").oninput = () => { len = Math.max(1 / fps, (Number($("tr-dur").value) || 0) * sp); paint(); };
-  let dr;
+  $("tr-from").oninput = () => { from = Math.max(0, Math.min(D - 1 / fps, Number($("tr-from").value) || 0)); centre(); paint(); };
+  $("tr-dur").oninput = () => { len = Math.max(1 / fps, Math.min(D - from, (Number($("tr-dur").value) || 0) * sp)); paint(); };
+  el.onwheel = (e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); zoomBy(Math.exp(-e.deltaY * 0.01)); } };
+  const pts = new Map(); let dr, pz;
   el.onpointerdown = (e) => {
+    pts.set(e.pointerId, e.clientX); el.setPointerCapture(e.pointerId);
+    if (pts.size === 2) { const [a, b] = [...pts.values()]; pz = { d: Math.abs(a - b) || 1, span }; dr = undefined; return; }
     const h = e.target.closest(".hdl")?.dataset.h ?? (e.target.closest(".selr") ? "move" : null);
     if (!h) return;
-    dr = { h, x0: e.clientX, from, len }; el.setPointerCapture(e.pointerId); e.preventDefault();
+    dr = { h, x0: e.clientX, from, len }; e.preventDefault();
   };
   el.onpointermove = (e) => {
+    if (pts.has(e.pointerId)) pts.set(e.pointerId, e.clientX);
+    if (pz && pts.size === 2) { const [a, b] = [...pts.values()]; span = Math.max(Math.min(D, 0.5), Math.min(D, pz.span * pz.d / (Math.abs(a - b) || 1))); centre(); paint(); return; }
     if (!dr) return;
-    const ds = ((e.clientX - dr.x0) / W) * D, min = 1 / fps;
+    const ds = ((e.clientX - dr.x0) / W) * span, min = 1 / fps;
     if (dr.h === "in") { const end = dr.from + dr.len; from = Math.max(0, Math.min(end - min, dr.from + ds)); len = end - from; }
     else if (dr.h === "out") len = Math.max(min, Math.min(D - dr.from, dr.len + ds));
     else from = Math.max(0, Math.min(D - dr.len, dr.from + ds));
     sync();
   };
-  el.onpointerup = el.onpointercancel = () => { dr = undefined; };
+  el.onpointerup = el.onpointercancel = (e) => { pts.delete(e.pointerId); if (pts.size < 2) pz = undefined; if (dr) { dr = undefined; centre(); paint(); } };
   paint();
 }
 
@@ -627,8 +666,10 @@ function renderPicker() {
     const fig = document.createElement("figure");
     fig.title = `Preview ${f.name}, then insert it as a 3 s shot`;
     if (addPick && addPick.name === f.name && addPick.dir === f.dir) fig.className = "on";
-    fig.innerHTML = `<img loading="lazy" alt="" src="/api/thumb?d=${encodeURIComponent(f.dir)}&f=${encodeURIComponent(f.name)}"><figcaption>${esc(f.dir)}/${esc(f.name)}</figcaption>`;
-    fig.onclick = () => { addPick = f; renderPicker(); preview(); };
+    fig.innerHTML = `<img loading="lazy" alt="" draggable="false" src="/api/thumb?d=${encodeURIComponent(f.dir)}&f=${encodeURIComponent(f.name)}"><figcaption>${esc(f.dir)}/${esc(f.name)}</figcaption>`;
+    fig.onclick = () => { if (binDrag?.moved) return; addPick = f; renderPicker(); preview(); };
+    fig.addEventListener("pointerdown", (e) => startBinDrag(e, f, fig));
+    fig.ondragstart = (e) => e.preventDefault();   // no native image drag: it swallows pointermove
     pk.appendChild(fig);
   }
   if (!addPick) $("pickhint").textContent = !state?.editable ? "Read only: serve the .otio file to add clips." : list.length ? "Tap a file to preview it, then insert." : mediaFiles.length ? "No file matches the search." : "No media files found next to the edit.";
@@ -654,6 +695,98 @@ function closeAdd() { $("addsheet").classList.remove("open"); const v = $("addpr
 $("addclose").onclick = closeAdd;
 $("addsheet").addEventListener("pointerdown", (e) => { if (e.target === $("addsheet")) closeAdd(); });
 $("addbtn").onclick = () => { loadMedia(); if (wide()) $("addq").focus(); else $("addsheet").classList.add("open"); };
+// ---------------------------------------------------------------- drag a media file onto the timeline
+// Mouse: press and move. Touch: long-press, then drag (the picker sheet fades out of the way).
+let binDrag;
+function startBinDrag(e, f, fig) {
+  if (!canEdit() || e.button > 0) return;
+  binDrag = { f, x0: e.clientX, y0: e.clientY, moved: false, touch: e.pointerType !== "mouse", armed: e.pointerType === "mouse" };
+  if (binDrag.touch) binDrag.timer = setTimeout(() => { if (binDrag && !binDrag.moved) { binDrag.armed = true; begin(e.clientX, e.clientY); } }, 420);
+  const begin = (x, y) => {
+    binDrag.moved = true;
+    const gh = document.createElement("div");
+    gh.className = "ghost"; gh.innerHTML = `<img alt="" src="${fig.querySelector("img").src}"><span>${esc(f.name)}</span>`;
+    document.body.appendChild(gh); binDrag.ghost = gh;
+    document.body.classList.add("bindrag");
+    move(x, y);
+  };
+  const move = (x, y) => {
+    if (!binDrag?.ghost) return;
+    binDrag.ghost.style.left = x + 12 + "px"; binDrag.ghost.style.top = y + 12 + "px";
+    dropTo = slotAt(x, y); dropLabel = dropTo ? `insert at ${dropTo}` : ""; draw();
+  };
+  const onMove = (ev) => {
+    if (!binDrag) return;
+    const far = Math.hypot(ev.clientX - binDrag.x0, ev.clientY - binDrag.y0) > 6;
+    if (!binDrag.moved) {
+      if (binDrag.touch && far) { clearTimeout(binDrag.timer); return end(); }   // a scroll, not a drag
+      if (binDrag.armed && far) begin(ev.clientX, ev.clientY);
+      return;
+    }
+    move(ev.clientX, ev.clientY);
+  };
+  const stopScroll = (ev) => { if (binDrag?.moved) ev.preventDefault(); };
+  const end = (ev) => {
+    removeEventListener("pointermove", onMove); removeEventListener("pointerup", end); removeEventListener("pointercancel", end);
+    removeEventListener("touchmove", stopScroll);
+    const d = binDrag; if (!d) return;
+    clearTimeout(d.timer); d.ghost?.remove(); document.body.classList.remove("bindrag");
+    const to = ev && d.moved && ev.type === "pointerup" ? slotAt(ev.clientX, ev.clientY) : 0;
+    dropTo = 0; draw();
+    if (to) { edit({ op: "insert", at: to, file: f.name, dir: f.dir, dur: STILL.test(f.name) ? 4 : 3 }); closeAdd(); }
+    setTimeout(() => { if (binDrag === d) binDrag = undefined; }, 0);
+  };
+  addEventListener("pointermove", onMove); addEventListener("pointerup", end); addEventListener("pointercancel", end);
+  addEventListener("touchmove", stopScroll, { passive: false });
+}
+const STILL = /\.(png|jpe?g|webp|bmp)$/i;
+
+// ---------------------------------------------------------------- files from the computer: drop or pick, upload, insert
+function uploadOne(file, onProgress) {
+  return new Promise((ok, fail) => {
+    const x = new XMLHttpRequest();
+    x.open("POST", `/api/upload?f=${encodeURIComponent(file.name)}`);
+    x.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
+    x.onload = () => { let j = {}; try { j = JSON.parse(x.responseText); } catch {} x.status === 200 ? ok(j) : fail(new Error(j.error ?? `upload failed (${x.status})`)); };
+    x.onerror = () => fail(new Error("upload failed (network)"));
+    x.send(file);
+  });
+}
+let uploading = "";
+async function uploadFiles(files, at) {
+  if (!canEdit()) return toast("Read only: serve the .otio file to add clips.", { bad: true });
+  let pos = at || (clipAtT(cur(), t)?.n ?? 0) + 1, added = 0;
+  for (const [k, file] of [...files].entries()) {
+    try {
+      const j = await uploadOne(file, (p) => { uploading = `uploading ${k + 1}/${files.length} ${Math.round(p * 100)}%`; chip(); });
+      uploading = ""; chip();
+      if (/\.(wav|mp3|ogg|m4a|flac)$/i.test(j.name)) { toast(`${j.name} uploaded: pick it in the music tab`); continue; }
+      await edit({ op: "insert", at: pos++, file: j.name, dir: j.dir, dur: STILL.test(j.name) ? 4 : 3 }, `${j.name} added at ${pos - 1}`);
+      added++;
+    } catch (e) { uploading = ""; chip(); toast(`${file.name}: ${e.message}`, { bad: true }); }
+  }
+  mediaLoaded = false; loadMedia();
+  return added;
+}
+let dragDepth = 0;
+const hasFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes("Files");
+addEventListener("dragenter", (e) => { if (!hasFiles(e)) return; dragDepth++; document.body.classList.add("filedrop"); });
+addEventListener("dragleave", (e) => { if (!hasFiles(e)) return; if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove("filedrop"); dropTo = 0; draw(); } });
+addEventListener("dragover", (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault(); e.dataTransfer.dropEffect = "copy";
+  const s = slotAt(e.clientX, e.clientY);
+  if (s !== dropTo) { dropTo = s; dropLabel = s ? `drop to insert at ${s}` : ""; draw(); }
+});
+addEventListener("drop", (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault(); dragDepth = 0; document.body.classList.remove("filedrop");
+  const at = slotAt(e.clientX, e.clientY); dropTo = 0; draw();
+  uploadFiles(e.dataTransfer.files, at);
+});
+$("uploadbtn").onclick = () => $("upfile").click();
+$("upfile").onchange = () => { const fs = [...$("upfile").files]; $("upfile").value = ""; if (fs.length) { closeAdd(); uploadFiles(fs); } };
+
 function renderMediaHint() { if (!addPick) renderPicker(); }
 
 // ---------------------------------------------------------------- render full (opt-in, one at a time)
@@ -698,6 +831,14 @@ function renderInspector() {
     <div class="rowf">${ty === "cut" ? "" : `<label class="fld" title="Transition length in seconds">duration (s)${stepper("it-tdur", ty === c.in ? c.inDur : TDEF[ty], 0.05, 0.01, "transition length")}</label>`}
     <label class="fld" title="Side the new clip slides in from" style="${ty === "slide" ? "" : "display:none"}">from<select id="it-dir" ${ro}>${["left", "right", "up", "down"].map((d) => `<option ${d === (c.inDir ?? "left") ? "selected" : ""}>${d}</option>`).join("")}</select></label>
     <button class="primary" id="it-tapply" title="Save the transition into this clip" ${ro}>apply transition</button></div></div>`;
+  if (c.kind === "shot") {
+    const mo = draftMotion?.n === c.n ? draftMotion.m : c.motion ?? "still";
+    h += `<div class="sec"><h3>camera motion</h3><div class="seg" id="it-motion">` +
+      [["auto", "auto motion", "A gentle Ken Burns move (slow zoom and drift), different for each clip; the default for images"], ["still", "still", "No camera motion"], ["custom", "custom", "Set the start and end framing yourself: drag the two rectangles"]]
+        .map(([v, l, tip]) => `<button data-m="${v}" class="${mo === v ? "on" : ""}" title="${tip}" ${ro}>${l}</button>`).join("") + `</div>` +
+      (mo === "custom" ? `<div class="kb" id="kb" title="Drag a rectangle to move that framing; drag its corner to zoom. Grey dashed = start, amber = end"><img alt="" draggable="false" onerror="if(!this.dataset.r){this.dataset.r=1;setTimeout(()=>{this.src+='&amp;r=1'},800)}" src="/api/srcframe?name=${encodeURIComponent(sel)}&n=${c.n}&t=${((c.from ?? 0) + 0.5).toFixed(2)}&w=480"><div class="kbr" data-r="0"><span>start</span><i data-c="0" title="Drag to zoom the start framing"></i></div><div class="kbr end" data-r="1"><span>end</span><i data-c="1" title="Drag to zoom the end framing"></i></div></div>
+        <button class="primary" id="it-mapply" title="Save this custom start and end framing" ${ro}>apply motion</button>` : "") + `</div>`;
+  }
   h += `<div class="sec"><h3>speed badge</h3><div class="seg" id="it-badge">` +
     [["", "off", "No badge"], ["1x", "1x", "Show a 1x badge in the top-right corner"], ["10x", "10x", "Show a 10x badge in the top-right corner (sped-up footage)"]]
       .map(([v, l, tip]) => `<button data-b="${v}" class="${(c.badge ?? "") === v ? "on" : ""}" title="${tip}" ${ro}>${l}</button>`).join("") + `</div>
@@ -718,8 +859,50 @@ function renderInspector() {
     draftTrans = undefined;
     edit(body, `clip ${c.n} transition: ${ty}`);
   };
+  for (const b of box.querySelectorAll("#it-motion button")) b.onclick = () => {
+    if (b.dataset.m === "custom") { draftMotion = { n: c.n, m: "custom" }; box.dataset.key = ""; renderInspector(); }
+    else { draftMotion = undefined; edit({ op: "motion", n: c.n, motion: b.dataset.m }, `clip ${c.n} motion: ${b.dataset.m}`); }
+  };
+  if ($("kb")) kbEditor(c, tr);
   for (const b of box.querySelectorAll("#it-badge button")) b.onclick = () => edit({ op: "badge", n: c.n, badge: b.dataset.b || null }, `clip ${c.n} badge ${b.dataset.b || "off"}`);
 }
+// ---------------------------------------------------------------- custom Ken Burns: start / end framing rectangles
+let draftMotion;
+function kbEditor(c, tr) {
+  const box = $("kb"), img = box.querySelector("img"), rects = [...box.querySelectorAll(".kbr")];
+  const A = (c.srcW || 16) / (c.srcH || 9), F = tr.w / tr.h;
+  box.style.aspectRatio = `${A}`;
+  // visible fraction of the image at zoom 1 (cover fit)
+  const fw = A > F ? F / A : 1, fh = A > F ? 1 : A / F;
+  const mv = c.move ?? { zoom: [1, 1.1], x: [0.5, 0.5], y: [0.5, 0.5] };
+  const st = [0, 1].map((k) => ({ z: mv.zoom[k], x: mv.x[k], y: mv.y[k] }));
+  const geom = (s) => { const w = fw / s.z, h = fh / s.z; return { w, h, cx: Math.max(w / 2, Math.min(1 - w / 2, s.x)), cy: Math.max(h / 2, Math.min(1 - h / 2, s.y)) }; };
+  const paint = () => rects.forEach((r, k) => { const q = geom(st[k]); Object.assign(r.style, { left: (q.cx - q.w / 2) * 100 + "%", top: (q.cy - q.h / 2) * 100 + "%", width: q.w * 100 + "%", height: q.h * 100 + "%" }); });
+  let dr;
+  box.onpointerdown = (e) => {
+    const r = e.target.closest(".kbr"); if (!r) return;
+    const k = Number(r.dataset.r), corner = !!e.target.closest("i");
+    const q = geom(st[k]);
+    dr = { k, corner, x0: e.clientX, y0: e.clientY, s: { ...st[k], x: q.cx, y: q.cy } };
+    box.setPointerCapture(e.pointerId); e.preventDefault();
+  };
+  box.onpointermove = (e) => {
+    if (!dr) return;
+    const b = box.getBoundingClientRect(), dx = (e.clientX - dr.x0) / b.width, dy = (e.clientY - dr.y0) / b.height, s = st[dr.k];
+    if (dr.corner) { const w0 = fw / dr.s.z, w = Math.max(fw / 4, Math.min(fw, w0 + dx * 2)); s.z = fw / w; }
+    else { s.x = dr.s.x + dx; s.y = dr.s.y + dy; }
+    const q = geom(s); s.x = q.cx; s.y = q.cy;
+    paint();
+  };
+  box.onpointerup = box.onpointercancel = () => { dr = undefined; };
+  img.onload = paint; paint();
+  $("it-mapply").onclick = () => {
+    const r3 = (v) => Math.round(v * 1000) / 1000;
+    draftMotion = undefined;
+    edit({ op: "motion", n: c.n, motion: "custom", move: { zoom: [r3(Math.max(1, st[0].z)), r3(Math.max(1, st[1].z))], x: [r3(st[0].x), r3(st[1].x)], y: [r3(st[0].y), r3(st[1].y)] } }, `clip ${c.n} custom motion`);
+  };
+}
+
 // ---------------------------------------------------------------- music panel
 let audioFiles = [], musicPick;
 function renderMusic() {

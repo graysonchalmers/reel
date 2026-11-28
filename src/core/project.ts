@@ -5,6 +5,10 @@ import { ReelError, didYouMean, wrap } from "./errors.ts";
 export type Ease = "linear" | "in" | "out" | "inOut";
 export type TransType = "cut" | "fade" | "dip" | "flash" | "wipe" | "slide" | "zoom";
 export type Dir = "left" | "right" | "up" | "down";
+export type Motion = "auto" | "still" | "custom";
+const MOTIONS: Motion[] = ["auto", "still", "custom"];
+/** Still images (no frames of their own): these get an automatic Ken Burns move by default. */
+export const STILL_RE = /\.(png|jpe?g|webp|bmp)$/i;
 
 export interface Trans { __trans: true; type: TransType; dur: number; color: string; dir: Dir }
 export interface Sfx { __sfx: true; src: string; at: number; vol: number; loc?: string }
@@ -46,6 +50,9 @@ export interface ShotDef extends ClipBase {
   /** Source seconds where the shot starts. */
   from: number;
   speed: number;
+  /** Camera motion: "auto" = a gentle seeded Ken Burns move (the default for still images that
+   *  have no `move`), "still" = no motion, "custom" = the `move` as given. */
+  motion?: Motion;
   fit: "cover" | "contain";
   pixel: boolean;
   bg: string;
@@ -91,7 +98,7 @@ const CLIP_OPTS = ["dur", "beats", "in", "sfx", "overlay", "grade", "badge"];
 const OVERLAY_OPTS = ["src", "x", "y", "w", "h", "at", "dur", "opacity", "pixel"];
 const GRADE_OPTS = ["brightness", "contrast", "saturation", "gamma", "tint", "tintAmount", "vignette"];
 const DIRS: Dir[] = ["left", "right", "up", "down"];
-const SHOT_OPTS = [...CLIP_OPTS, "from", "speed", "fit", "pixel", "bg", "move", "audio", "caption"];
+const SHOT_OPTS = [...CLIP_OPTS, "motion", "from", "speed", "fit", "pixel", "bg", "move", "audio", "caption"];
 const TITLE_OPTS = [...CLIP_OPTS, "sub", "size", "font", "weight", "color", "tracking", "pos", "shadow", "bg", "anim"];
 const MOVE_OPTS = ["zoom", "x", "y", "ease"];
 const TEXT_OPTS = ["text", "size", "font", "weight", "color", "tracking", "pos", "shadow"];
@@ -305,6 +312,7 @@ export class Project {
         kind: "shot", ...clipBase(o, `shot ${src}`, loc), src: path,
         from: o.from === undefined ? 0 : num("from", o.from, 0),
         speed: o.speed === undefined ? 1 : num("speed", o.speed, 0.05, 20),
+        motion: o.motion === undefined ? undefined : oneOf("motion", o.motion, MOTIONS),
         fit: o.fit === undefined ? "cover" : oneOf("fit", o.fit, ["cover", "contain"] as const),
         pixel: Boolean(o.pixel),
         bg: o.bg === undefined ? "#000000" : color("bg", o.bg),
@@ -365,7 +373,7 @@ export class Project {
         const frames = Math.max(1, end - frame);
         if (i === 0 && !["cut", "flash", "dip", "slide", "zoom"].includes(c.in.type)) throw new ReelError(`the first clip can't ${c.in.type} in from nothing; use the trailer's fadeIn or dip()`);
         if (c.in.dur * def.fps > frames) throw new ReelError(`the ${c.in.type} (${c.in.dur}s) is longer than the clip (${(frames / def.fps).toFixed(2)}s)`);
-        clips.push({ i, def: c, start: frame / def.fps, dur: frames / def.fps, frames });
+        clips.push({ i, def: c.kind === "shot" ? withMotion(c, i) : c, start: frame / def.fps, dur: frames / def.fps, frames });
         frame += frames;
       } catch (e) {
         throw wrap(e).within(`clip ${i + 1} (${c.label})`, c.loc).within(`trailer '${name}'`, def.loc);
@@ -376,6 +384,30 @@ export class Project {
     if (def.bpm) for (let k = 0, spb = 60 / def.bpm; def.beat0 + k * spb <= dur + 1e-6; k++) beats.push(Math.round((def.beat0 + k * spb) * 1e6) / 1e6);
     return { def, clips, dur, frames: frame, beats };
   }
+}
+
+const isIdentity = (m: Move) => m.zoom[0] === 1 && m.zoom[1] === 1 && m.x[0] === 0.5 && m.x[1] === 0.5 && m.y[0] === 0.5 && m.y[1] === 0.5;
+/** The motion a shot resolves to: explicit, else "auto" for a still image with no move. */
+export function motionOf(d: ShotDef): Motion {
+  return d.motion ?? (STILL_RE.test(d.src) && isIdentity(d.move) ? "auto" : isIdentity(d.move) ? "still" : "custom");
+}
+/** A gentle Ken Burns move, seeded by the source and the clip's place, so the same edit always
+ *  moves the same way and neighbouring images differ (in vs out, opposite drift). */
+export function autoMove(src: string, i: number): Move {
+  let h = 2166136261;
+  for (const ch of src.replace(/^.*[\\/]/, "") + "#" + i) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);   // seeded by file name, not folder: same move on any machine
+  const rnd = () => { h = Math.imul(h ^ (h >>> 15), 2246822507); h = Math.imul(h ^ (h >>> 13), 3266489909); return ((h ^= h >>> 16) >>> 0) / 4294967296; };
+  const z = 1.08 + rnd() * 0.06;                       // 1.08..1.14 at the tight end
+  const ang = rnd() * Math.PI * 2, r = 0.08 + rnd() * 0.1;
+  const fx = 0.5 + Math.cos(ang) * r, fy = 0.5 + Math.sin(ang) * r * 0.7;
+  const zoomIn = i % 2 === 0;                          // alternate in / out so neighbours differ
+  return zoomIn ? { zoom: [1, z], x: [0.5, fx], y: [0.5, fy], ease: "inOut" } : { zoom: [z, 1], x: [fx, 0.5], y: [fy, 0.5], ease: "inOut" };
+}
+function withMotion(c: ShotDef, i: number): ShotDef {
+  const m = motionOf(c);
+  if (m === "auto") return { ...c, motion: m, move: autoMove(c.src, i) };
+  if (m === "still") return { ...c, motion: m, move: { zoom: [1, 1], x: [0.5, 0.5], y: [0.5, 0.5], ease: "inOut" } };
+  return { ...c, motion: m };
 }
 
 export function ease(e: Ease, p: number): number {
