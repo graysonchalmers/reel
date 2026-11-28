@@ -129,10 +129,10 @@ trailer("t", { w: 64, h: 36, fps: 30, bpm: 84 },
 
 test("slide and zoom transitions, clip and trailer grades, overlays over clips", () => {
   const p = loadSource(`trailer("t", { w: 16, h: 16, fps: 10, grade: { saturation: 1 } },
-    shot("a.png", { dur: 1, grade: { brightness: -0.5 } }),
-    shot("b.png", { dur: 1, in: slide(1, "left") }),
-    shot("c.png", { dur: 1, in: zoom(1) }),
-    shot("a.png", { dur: 1, overlay: { src: "c.png", x: 0.25, y: 0.25, w: 0.25, at: 0.5 } }))`, "t.rx.js", dir);
+    shot("a.png", { dur: 1, motion: "still", grade: { brightness: -0.5 } }),
+    shot("b.png", { dur: 1, motion: "still", in: slide(1, "left") }),
+    shot("c.png", { dur: 1, motion: "still", in: zoom(1) }),
+    shot("a.png", { dur: 1, motion: "still", overlay: { src: "c.png", x: 0.25, y: 0.25, w: 0.25, at: 0.5 } }))`, "t.rx.js", dir);
   const tl = p.timeline("t");
   const colors: Record<string, Img> = { "a.png": solid(255, 0, 0), "b.png": solid(0, 0, 255), "c.png": solid(0, 255, 0) };
   const name = (s: string) => s.replace(/^.*\//, "");
@@ -149,7 +149,7 @@ test("slide and zoom transitions, clip and trailer grades, overlays over clips",
   assert.deepEqual(px(frameAt(tl, 3.2, src), 4, 4), [255, 0, 0], "before `at`: no overlay");
   assert.deepEqual(px(frameAt(tl, 3.7, src), 4, 4), [0, 255, 0], "overlay pixel");
   assert.deepEqual(px(frameAt(tl, 3.7, src), 12, 12), [255, 0, 0], "outside the overlay");
-  const down = loadSource(`trailer("t", { w: 16, h: 16, fps: 10 }, shot("a.png", { dur: 1 }), shot("b.png", { dur: 1, in: slide(1, "down") }))`, "t.rx.js", dir).timeline("t");
+  const down = loadSource(`trailer("t", { w: 16, h: 16, fps: 10 }, shot("a.png", { dur: 1, motion: "still" }), shot("b.png", { dur: 1, motion: "still", in: slide(1, "down") }))`, "t.rx.js", dir).timeline("t");
   assert.deepEqual(px(frameAt(down, 1.5, src), 8, 12), [0, 0, 255], "from below: the bottom half is the new clip");
   assert.deepEqual(px(frameAt(down, 1.5, src), 8, 3), [255, 0, 0]);
   throwsMsg(() => loadSource(`trailer("t", {}, shot("a.png", { in: slide(0.3, "sideways") }))`, "t.rx.js"), /slide\(\) direction must be one of/);

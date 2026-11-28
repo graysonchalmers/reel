@@ -395,7 +395,7 @@ export function motionOf(d: ShotDef): Motion {
  *  moves the same way and neighbouring images differ (in vs out, opposite drift). */
 export function autoMove(src: string, i: number): Move {
   let h = 2166136261;
-  for (const ch of src + "#" + i) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
+  for (const ch of src.replace(/^.*[\\/]/, "") + "#" + i) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);   // seeded by file name, not folder: same move on any machine
   const rnd = () => { h = Math.imul(h ^ (h >>> 15), 2246822507); h = Math.imul(h ^ (h >>> 13), 3266489909); return ((h ^= h >>> 16) >>> 0) / 4294967296; };
   const z = 1.08 + rnd() * 0.06;                       // 1.08..1.14 at the tight end
   const ang = rnd() * Math.PI * 2, r = 0.08 + rnd() * 0.1;

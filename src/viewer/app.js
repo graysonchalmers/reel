@@ -312,6 +312,7 @@ cv.addEventListener("wheel", (e) => {
   else if (zoom > 1) { e.preventDefault(); view0 += ((Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY) / pps()); clampView(); draw(); }
 }, { passive: false });
 addEventListener("resize", () => { placeMedia(); draw(); });
+if (window.ResizeObserver) new ResizeObserver(() => draw()).observe(cv);   // panel and sheet changes resize the canvas without a window resize
 
 // ---------------------------------------------------------------- clip menu (right-click / long-press)
 const menu = $("menu");
@@ -579,11 +580,13 @@ function wireSteppers(root) {
 // ---------------------------------------------------------------- trim filmstrip
 // The strip shows a window [v0, v0 + span] of the source. It starts zoomed around the clip's range
 // (so long sources give fine handle steps); −/＋, Ctrl-wheel and pinch zoom it, around the clip.
+let stripZoom = {};   // span per clip, so a rebuild of the clip list keeps the filmstrip zoom
 function filmstrip(c) {
   const el = $("strip"); if (!el) return;
   const W = el.clientWidth, D = c.srcDur, sp = c.speed ?? 1, fps = cur().fps || 30, n = Math.max(4, Math.round(W / 80));
   let from = Number($("tr-from").value), len = Number($("tr-dur").value) * sp;
-  let span = Math.min(D, Math.max(2, len * 3)), v0 = 0;
+  const zkey = `${sel}|${c.n}|${c.text}`;
+  let span = stripZoom[zkey] ?? Math.min(D, Math.max(2, len * 3)), v0 = 0;
   const centre = () => { v0 = Math.max(0, Math.min(D - span, from + len / 2 - span / 2)); };
   centre();
   el.innerHTML = `<div class="frames"></div><div class="selr"></div><div class="hdl" data-h="in" title="In point: drag to change where the clip starts in its source"></div><div class="hdl" data-h="out" title="Out point: drag to change where the clip ends"></div>`;
@@ -607,6 +610,7 @@ function filmstrip(c) {
     hin.style.left = px(from) + "px"; hout.style.left = px(from + len) + "px";
     $("striptxt").textContent = `${from.toFixed(2)}–${(from + len).toFixed(2)}s`;
     $("stripv0").textContent = `${v0.toFixed(1)}s`; $("stripv1").textContent = `${(v0 + span).toFixed(1)}s`;
+    stripZoom = { [zkey]: span };
     $("stripzoom").textContent = `${(D / span).toFixed(D / span < 10 ? 1 : 0)}×`;
   };
   const zoomBy = (f) => { span = Math.max(Math.min(D, 0.5), Math.min(D, span / f)); centre(); paint(); };
@@ -662,9 +666,10 @@ function renderPicker() {
     const fig = document.createElement("figure");
     fig.title = `Preview ${f.name}, then insert it as a 3 s shot`;
     if (addPick && addPick.name === f.name && addPick.dir === f.dir) fig.className = "on";
-    fig.innerHTML = `<img loading="lazy" alt="" src="/api/thumb?d=${encodeURIComponent(f.dir)}&f=${encodeURIComponent(f.name)}"><figcaption>${esc(f.dir)}/${esc(f.name)}</figcaption>`;
+    fig.innerHTML = `<img loading="lazy" alt="" draggable="false" src="/api/thumb?d=${encodeURIComponent(f.dir)}&f=${encodeURIComponent(f.name)}"><figcaption>${esc(f.dir)}/${esc(f.name)}</figcaption>`;
     fig.onclick = () => { if (binDrag?.moved) return; addPick = f; renderPicker(); preview(); };
     fig.addEventListener("pointerdown", (e) => startBinDrag(e, f, fig));
+    fig.ondragstart = (e) => e.preventDefault();   // no native image drag: it swallows pointermove
     pk.appendChild(fig);
   }
   if (!addPick) $("pickhint").textContent = !state?.editable ? "Read only: serve the .otio file to add clips." : list.length ? "Tap a file to preview it, then insert." : mediaFiles.length ? "No file matches the search." : "No media files found next to the edit.";
@@ -831,7 +836,7 @@ function renderInspector() {
     h += `<div class="sec"><h3>camera motion</h3><div class="seg" id="it-motion">` +
       [["auto", "auto motion", "A gentle Ken Burns move (slow zoom and drift), different for each clip; the default for images"], ["still", "still", "No camera motion"], ["custom", "custom", "Set the start and end framing yourself: drag the two rectangles"]]
         .map(([v, l, tip]) => `<button data-m="${v}" class="${mo === v ? "on" : ""}" title="${tip}" ${ro}>${l}</button>`).join("") + `</div>` +
-      (mo === "custom" ? `<div class="kb" id="kb" title="Drag a rectangle to move that framing; drag its corner to zoom. Grey dashed = start, amber = end"><img alt="" draggable="false" src="/api/srcframe?name=${encodeURIComponent(sel)}&n=${c.n}&t=${((c.from ?? 0) + 0.5).toFixed(2)}&w=480"><div class="kbr" data-r="0"><span>start</span><i data-c="0" title="Drag to zoom the start framing"></i></div><div class="kbr end" data-r="1"><span>end</span><i data-c="1" title="Drag to zoom the end framing"></i></div></div>
+      (mo === "custom" ? `<div class="kb" id="kb" title="Drag a rectangle to move that framing; drag its corner to zoom. Grey dashed = start, amber = end"><img alt="" draggable="false" onerror="if(!this.dataset.r){this.dataset.r=1;setTimeout(()=>{this.src+='&amp;r=1'},800)}" src="/api/srcframe?name=${encodeURIComponent(sel)}&n=${c.n}&t=${((c.from ?? 0) + 0.5).toFixed(2)}&w=480"><div class="kbr" data-r="0"><span>start</span><i data-c="0" title="Drag to zoom the start framing"></i></div><div class="kbr end" data-r="1"><span>end</span><i data-c="1" title="Drag to zoom the end framing"></i></div></div>
         <button class="primary" id="it-mapply" title="Save this custom start and end framing" ${ro}>apply motion</button>` : "") + `</div>`;
   }
   h += `<div class="sec"><h3>speed badge</h3><div class="seg" id="it-badge">` +

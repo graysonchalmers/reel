@@ -6,6 +6,23 @@ import { Resvg } from "@resvg/resvg-js";
 import { createServer, type ServerResponse } from "node:http";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// ffmpeg single-frame grabs for the trim filmstrip: at most 4 at a time, never blocking the event loop
+const frameCache = new Map<string, Promise<Buffer | undefined>>();
+let grabbing = 0;
+const grabQueue: (() => void)[] = [];
+function grabFrame(args: string[]): Promise<Buffer | undefined> {
+  return new Promise((done) => {
+    const run = () => {
+      grabbing++;
+      const p = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "ignore"] }), parts: Buffer[] = [];
+      p.stdout.on("data", (b: Buffer) => parts.push(b));
+      p.on("error", () => {});
+      p.on("close", (code) => { grabbing--; grabQueue.shift()?.(); const b = Buffer.concat(parts); done(code === 0 && b.length ? b : undefined); });
+    };
+    if (grabbing < 4) run(); else grabQueue.push(run);
+  });
+}
 import { deflateSync } from "node:zlib";
 import { frameAt, scaled } from "../core/compose.ts";
 import { type ReelError, wrap } from "../core/errors.ts";
@@ -268,10 +285,19 @@ export function serve(file: string, opts: ServeOptions = {}): Promise<{ url: str
         if (!c || c.def.kind !== "shot") { res.writeHead(404); res.end(); return; }
         const w = Math.max(32, Math.min(480, Number(url.searchParams.get("w")) || 160)), ts = Math.max(0, Number(url.searchParams.get("t")) || 0);
         const still = /\.(png|jpe?g|webp)$/i.test(c.def.src);
-        const r = spawnSync("ffmpeg", ["-v", "error", ...(still ? [] : ["-ss", ts.toFixed(3)]), "-i", c.def.src, "-frames:v", "1", "-vf", `scale=${w}:-2`, "-f", "image2", "-c:v", "mjpeg", "-"], { maxBuffer: 8 << 20 });
-        if (r.status !== 0 || !r.stdout.length) { res.writeHead(404); res.end(); return; }
-        res.writeHead(200, { "content-type": "image/jpeg", "cache-control": "max-age=600" });
-        res.end(r.stdout);
+        // async + cached: a zoomed filmstrip asks for a dozen frames at once and must not stall the server
+        const key = `${c.def.src}|${still ? 0 : ts.toFixed(2)}|${w}`;
+        let job = frameCache.get(key);
+        if (!job) {
+          job = grabFrame(["-v", "error", ...(still ? [] : ["-ss", ts.toFixed(3)]), "-i", c.def.src, "-frames:v", "1", "-vf", `scale=${w}:-2`, "-f", "image2", "-c:v", "mjpeg", "-"]);
+          frameCache.set(key, job);
+          if (frameCache.size > 400) frameCache.delete(frameCache.keys().next().value!);
+        }
+        void job.then((jpg) => {
+          if (!jpg) { frameCache.delete(key); res.writeHead(404); res.end(); return; }
+          res.writeHead(200, { "content-type": "image/jpeg", "cache-control": "max-age=600" });
+          res.end(jpg);
+        });
       } else if (url.pathname === "/api/full") {
         const f = basename(url.searchParams.get("f") ?? "");
         if (!/\.mp4$/.test(f)) { res.writeHead(404); res.end(); return; }
