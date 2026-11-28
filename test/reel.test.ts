@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -410,4 +410,64 @@ test("every button and form control in the viewer explains itself with a title",
   // buttons made with createElement must get a .title before they are added
   for (const m of js.matchAll(/const (\w+) = document\.createElement\("button"\)/g)) if (!new RegExp(`${m[1]}\\.title\\s*=`).test(js)) bad.push(`createElement button ${m[1]}`);
   assert.deepEqual(bad, [], "controls without a tooltip");
+});
+
+test("still images get a smooth seeded Ken Burns move by default; still and custom override it", async () => {
+  const { toOtio, fromOtio, editOtio } = await import("../src/core/otio.ts");
+  const { Project, autoMove } = await import("../src/core/project.ts");
+  const p = loadSource(`trailer("t", { w: 64, h: 36, fps: 30 },
+    shot("grad.png", { dur: 2 }), shot("grad.png", { dur: 2 }), shot("grad.png", { dur: 1, motion: "still" }), shot("bg.mp4", { dur: 1 }))`, "t.rx.js", dir);
+  const tl = p.timeline("t");
+  const m = tl.clips.map((c: any) => c.def.motion);
+  assert.deepEqual(m, ["auto", "auto", "still", "still"]);
+  const a = (tl.clips[0].def as any).move, b = (tl.clips[1].def as any).move;
+  assert.ok(a.zoom[1] > 1.07 && a.zoom[1] <= 1.14 && a.zoom[0] === 1, "first zooms in");
+  assert.ok(b.zoom[0] > 1.07 && b.zoom[1] === 1, "the next one zooms out, so neighbours differ");
+  assert.deepEqual(autoMove("x.png", 3), autoMove("x.png", 3), "seeded: the same edit always moves the same way");
+  // consecutive frames of an image clip differ, and change smoothly (no jumps)
+  const grad = image(64, 36);
+  for (let y = 0; y < 36; y++) for (let x = 0; x < 64; x++) { const o = (y * 64 + x) * 4; grad.data[o] = x * 4; grad.data[o + 1] = y * 7; grad.data[o + 2] = (x * y) % 255; grad.data[o + 3] = 255; }
+  const src: Sources = { shot: () => grad, text: () => image(1, 1) };
+  const diff = (p: Img, q: Img) => { let d = 0; for (let k = 0; k < p.data.length; k += 4) d += Math.abs(p.data[k] - q.data[k]); return d / (p.w * p.h); };
+  const f = [0.5, 0.5 + 1 / 30, 0.5 + 2 / 30].map((t) => frameAt(tl, t, src));
+  const d1 = diff(f[0], f[1]), d2 = diff(f[1], f[2]);
+  assert.ok(d1 > 0 && d2 > 0, "consecutive frames differ");
+  assert.ok(d1 < 3 && d2 < 3 && Math.abs(d1 - d2) < 1, `smooth: ${d1} ${d2}`);
+  const s0 = frameAt(tl, 4.2, src), s1 = frameAt(tl, 4.6, src);
+  assert.equal(diff(s0, s1), 0, "motion: still holds the picture");
+  // the inspector's choice is stored in the .otio
+  let o = toOtio(tl);
+  o = editOtio(o, { op: "motion", n: 1, motion: "still" });
+  o = editOtio(o, { op: "motion", n: 2, motion: "custom", move: { zoom: [1, 1.5], x: [0.2, 0.8], y: [0.5, 0.5] } });
+  assert.throws(() => editOtio(o, { op: "motion", n: 2, motion: "custom" }), /needs a move/);
+  const q = new Project(); q.trailers.set("t", fromOtio(o)); q.order.push("t");
+  const tl2 = q.timeline("t");
+  assert.deepEqual(tl2.clips.slice(0, 2).map((c: any) => [c.def.motion, c.def.move.zoom]), [["still", [1, 1]], ["custom", [1, 1.5]]]);
+});
+
+test("uploads stream into media/uploads with safe unique names, never overwrite, and respect type and size limits", async () => {
+  const { toOtio } = await import("../src/core/otio.ts");
+  const sub = join(dir, "up"), media = join(sub, "media");
+  spawnSync("mkdir", ["-p", media]);
+  const a = loadSource(`trailer("t", { w: 64, h: 36, fps: 30 }, shot("${join(dir, "red.png")}", { dur: 1 }))`, "t.rx.js", dir).timeline("t");
+  const file = join(sub, "t.otio");
+  writeFileSync(file, JSON.stringify(toOtio(a)));
+  const s = await serve(file, { port: 0, log: () => {}, uploadCap: 1000 });
+  const png = readFileSync(join(dir, "red.png"));
+  const up = (name: string, body: Uint8Array) => fetch(s.url + "api/upload?f=" + encodeURIComponent(name), { method: "POST", body: new Blob([body as BlobPart]) }).then(async (r) => ({ status: r.status, j: await r.json() }));
+  try {
+    const one = await up("../../My Shot (1).png", png);
+    assert.equal(one.status, 200, JSON.stringify(one.j));
+    assert.deepEqual([one.j.name, one.j.dir], ["My-Shot-1.png", "uploads"]);
+    const two = await up("My Shot (1).png", png);
+    assert.equal(two.j.name, "My-Shot-1-1.png", "a second upload of the same name gets a new name");
+    assert.deepEqual(readFileSync(join(media, "uploads", "My-Shot-1.png")), png, "the first file is untouched");
+    assert.equal((await up("evil.sh", png)).status, 415);
+    assert.equal((await up("big.mp4", new Uint8Array(5000))).status, 413);
+    assert.ok(!readdirSync(join(media, "uploads")).some((f) => f.startsWith("big")), "a refused upload leaves nothing behind");
+    const list = await (await fetch(s.url + "api/media")).json();
+    assert.ok(list.some((f: any) => f.dir === "uploads" && f.name === "My-Shot-1.png"), "uploads show in the media list");
+    const ins = await fetch(s.url + "api/edit", { method: "POST", body: JSON.stringify({ op: "insert", at: 2, file: "My-Shot-1.png", dir: "uploads", dur: 2 }) });
+    assert.equal(ins.status, 200);
+  } finally { s.close(); }
 });

@@ -129,7 +129,9 @@ export type OtioEdit = { op: "move"; n: number; to: number } | { op: "delete"; n
   /** The trailer's music: a media file (absolute path) and volume, or `src: null` for none. */
   | { op: "music"; src?: string | null; vol?: number; from?: number }
   /** A corner badge over clip `n` (e.g. "10x"), or null to remove it. */
-  | { op: "badge"; n: number; badge: string | null };
+  | { op: "badge"; n: number; badge: string | null }
+  /** A shot's camera motion: auto Ken Burns, still, or a custom move (zoom/x/y as [start, end]). */
+  | { op: "motion"; n: number; motion: "auto" | "still" | "custom"; move?: { zoom: [number, number]; x: [number, number]; y: [number, number]; ease?: string } };
 const FIRST_OK = ["cut", "flash", "dip", "slide", "zoom"];
 export function editOtio(o: J, e: OtioEdit): J {
   const out = structuredClone(o);
@@ -229,6 +231,24 @@ export function editOtio(o: J, e: OtioEdit): J {
         in_offset: rt(half, fps), out_offset: rt(half, fps), metadata: { reel: { __trans: true, ...reel } } });
     }
     units[n] = [...lead, clip];
+    return finish(out, video, units);
+  }
+  if (e.op === "motion") {
+    const u = units[n], clip = u[u.length - 1];
+    if (clip.metadata?.reel?.kind === "title") throw new ReelError("a title has no camera motion");
+    if (!["auto", "still", "custom"].includes(e.motion)) throw new ReelError("motion must be auto, still or custom");
+    clip.metadata ??= {}; clip.metadata.reel ??= { kind: "shot" };
+    const r = clip.metadata.reel;
+    r.motion = e.motion;
+    if (e.motion === "custom") {
+      const m = e.move;
+      const pair = (v: unknown, what: string, lo: number, hi: number): [number, number] => {
+        if (!Array.isArray(v) || v.length !== 2 || v.some((x) => typeof x !== "number" || !Number.isFinite(x) || x < lo || x > hi)) throw new ReelError(`move ${what} must be [start, end] in ${lo}..${hi}`);
+        return [v[0], v[1]];
+      };
+      if (!m) throw new ReelError("a custom motion needs a move");
+      r.move = { zoom: pair(m.zoom, "zoom", 1, 8), x: pair(m.x, "x", 0, 1), y: pair(m.y, "y", 0, 1), ease: m.ease ?? "inOut" };
+    } else delete r.move;
     return finish(out, video, units);
   }
   if (e.op === "badge") {
